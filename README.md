@@ -124,8 +124,6 @@ const char* mqtt_server = "broker.hivemq.com";
 const int   mqtt_port   = 1883;
 const char* mqtt_topic  = "iot_car/commands";
 ```
-> Nota: Para entrega académica se dejan credenciales de demo. En un entorno real usar almacenamiento seguro (Preferences/NVS o portal de credenciales) y segmentación de red.
-
 ---
 
 ## Endpoints HTTP
@@ -249,16 +247,6 @@ sequenceDiagram
 5. **Intermitencia de red MQTT**  
    Broker no disponible → reintentos; publicación en cuanto reconecta.
 
-### Métricas sugeridas (llenar en `docs/metricas.txt`)
-- Latencia `/health`: 10–25 ms (LAN).
-- Latencia `/move` hasta PWM: 20–40 ms.
-- Tiempo de recepción MQTT: < 100 ms en cliente web.
-
-### Evidencias (añadir capturas a `docs/`)
-- `docs/resultados_postman.png` (200 y 400).  
-- `docs/subs_mqtt.png` (payload recibido).  
-- `docs/conexiones.png` (cableado real/montaje).
-
 ---
 
 ## Seguridad y Confiabilidad
@@ -279,11 +267,6 @@ sequenceDiagram
 - **Axel Ariza Pulido:** Control de motores, montaje y pruebas físicas.  
 - **Juan Pablo Benitez Bernal:** Servidor HTTP, validaciones y colección Postman.  
 - **Juan Montes Sabogal:** Cliente MQTT, diagramas y documentación.
-
-### Acta de reunión (resumen en `docs/acta_equipo.md`)
-- **Fecha:** 2025-10-07  
-- **Decisiones:** agregar token `X-API-Key`, documentar casos de error, publicar evidencias.  
-- **Pendientes:** subir capturas a `docs/`, registrar métricas y riesgos.
 
 ---
 
@@ -315,7 +298,7 @@ Resumen de requests incluidos:
 
 ---
 
-## Extracto del Sketch (puntos clave)
+## Puntos clave del Sketch
 
 - Servidor HTTP con `WebServer`.
 - Cliente MQTT con `PubSubClient`.
