@@ -103,7 +103,8 @@ graph TD
 ```
 WiFi-Cart/
 ├─ sketch_oct6a/
-│  └─ sketch_oct6a.ino        # Código principal del ESP32
+│  ├─ sketch_oct6a.ino
+│  └─ config.h
 ├─ .gitattributes
 └─ README.md
 ```
@@ -307,10 +308,167 @@ Resumen de requests incluidos:
 
 ---
 
+---
+## Telemetría de Ultrasonido (HC-SR04)
+- **Tópico MQTT de telemetría**: `iot_car/ultrasonic` (configurable con `MQTT_TOPIC_TELEM`)
+- **Período de publicación**: `1000 ms` por defecto (`ULTRASONIC_PERIOD_MS`).
+- **Modo mock**: activado por defecto (`USE_ULTRASONIC_MOCK=1`). Para usar el sensor real, compila con `-D USE_ULTRASONIC_MOCK=0`.
+**Payload JSON publicado:**
+```json
+{
+  "distance_cm": 123.45,     // null si timeout / lectura inválida
+  "ts": 412345,              // millis desde arranque
+  "chip_id": "cc9d3f4a0",
+  "ip": "172.20.10.5",
+  "mock": true
+}
+```
+---
+## Configuración por Preprocesador (`config.h`)
+Centraliza credenciales, pines y parámetros del proyecto. Puedes anularlos en tiempo de compilación con `-D`.
+```cpp
+// --------- WIFI ----------
+#ifndef WIFI_SSID
+#define WIFI_SSID "iPhone de Juan Pablo"
+#endif
+#ifndef WIFI_PASS
+#define WIFI_PASS "millos14"
+#endif
+// --------- MQTT ----------
+#ifndef MQTT_SERVER
+#define MQTT_SERVER "broker.hivemq.com"
+#endif
+#ifndef MQTT_PORT
+#define MQTT_PORT 1883
+#endif
+#ifndef MQTT_TOPIC_CMDS
+#define MQTT_TOPIC_CMDS "iot_car/commands"
+#endif
+#ifndef MQTT_TOPIC_TELEM
+#define MQTT_TOPIC_TELEM "iot_car/ultrasonic"
+#endif
+// --------- Pines Motores L298N ----------
+#ifndef ENA_PIN
+#define ENA_PIN 13   // PWM Motor Derecho
+#endif
+#ifndef ENB_PIN
+#define ENB_PIN 12   // PWM Motor Izquierdo
+#endif
+#ifndef IN1_PIN
+#define IN1_PIN 14
+#endif
+#ifndef IN2_PIN
+#define IN2_PIN 27
+#endif
+#ifndef IN3_PIN
+#define IN3_PIN 26
+#endif
+#ifndef IN4_PIN
+#define IN4_PIN 25
+#endif
+// --------- HC-SR04 ----------
+#ifndef TRIG_PIN
+#define TRIG_PIN 35  // Trigger (OUTPUT)
+#endif
+#ifndef ECHO_PIN
+#define ECHO_PIN 34  // Echo (INPUT) -> Debe bajar a 3.3V con divisor
+#endif
+// 1 = simulado, 0 = real
+#ifndef USE_ULTRASONIC_MOCK
+#define USE_ULTRASONIC_MOCK 1
+#endif
+#ifndef ULTRASONIC_PERIOD_MS
+#define ULTRASONIC_PERIOD_MS 1000
+#endif
+#ifndef ULTRASONIC_TIMEOUT_US
+#define ULTRASONIC_TIMEOUT_US 30000
+#endif
+```
+---
+## Función de Lectura y Publicación
+En el `sketch_oct6a.ino` se añade la lectura (mock o real) y la publicación periódica.
+```cpp
+float readUltrasonicCm() {
+#if USE_ULTRASONIC_MOCK
+  float base = random(1000, 25100) / 100.0f; // 10.00 a 250.99 cm
+  float jitter = random(-10, 10) / 100.0f;
+  return max(0.0f, base + jitter);
+#else
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(3);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, ULTRASONIC_TIMEOUT_US);
+  if (duration == 0) return -1.0f; // timeout
+  float distanceCm = duration / 58.0f; // us -> cm aproximado
+  return distanceCm;
+#endif
+}
+void publishUltrasonic() {
+  float d = readUltrasonicCm();
+  String payload = "{";
+  payload += "\"distance_cm\":"; payload += (d < 0 ? "null" : String(d, 2));
+  payload += ",\"ts\":" + String((unsigned long)millis());
+  payload += ",\"chip_id\":\"" + String(ESP.getEfuseMac(), HEX) + "\"";
+  payload += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
+  payload += ",\"mock\":"; payload += (USE_ULTRASONIC_MOCK ? "true" : "false");
+  payload += "}";
+  publishMqtt(MQTT_TOPIC_TELEM, payload);
+}
+```
+**Ejecución periódica en `loop()`**:
+```cpp
+static unsigned long nextTelemetryAt = 0;
+unsigned long now = millis();
+if ((long)(now - nextTelemetryAt) >= 0) {
+  publishUltrasonic();
+  nextTelemetryAt = now + ULTRASONIC_PERIOD_MS;
+}
+```
+---
+## Compilación con Overrides (opcional)
+Puedes cambiar parámetros **sin editar** `config.h` usando defines en la compilación.
+- **Arduino CLI**:
+```bash
+arduino-cli compile -b esp32:esp32:esp32   -D USE_ULTRASONIC_MOCK=0   -D TRIG_PIN=4 -D ECHO_PIN=5   -D MQTT_TOPIC_TELEM=\"iot_car/ultra_lab\"
+```
+- **PlatformIO (`platformio.ini`)**:
+```ini
+build_flags = 
+  -DUSE_ULTRASONIC_MOCK=0 
+  -DTRIG_PIN=4 -DECHO_PIN=5 
+  -DMQTT_TOPIC_TELEM=\"iot_car/ultra_lab\"
+```
+---
+## Precaución Eléctrica Importante
+El pin **ECHO** del HC‑SR04 entrega ~**5 V** y el **ESP32** solo admite **3.3 V** en entradas. 
+Usa un **divisor resistivo** (p. ej., 10 kΩ arriba y 20 kΩ abajo) para reducir el nivel antes de conectar a `ECHO_PIN`. 
+Comparte **GND** entre el ESP32 y el sensor.
+---
+## Pruebas Rápidas
+1. **Mock por defecto** → sin cambios, se publican lecturas cada 1s en `iot_car/ultrasonic`.
+   ```bash
+   mosquitto_sub -h broker.hivemq.com -t iot_car/ultrasonic -v
+   ```
+2. **Sensor físico** → compila con `-D USE_ULTRASONIC_MOCK=0` y **divisor** en ECHO.
+3. **Movimiento + telemetría** → `/move` sigue publicando en `iot_car/commands` mientras la telemetría fluye en paralelo.
+
+
 ## Referencias
 
-[1] OASIS, “MQTT Version 3.1.1,” 2014.  
-[2] Espressif Systems, “ESP32 Technical Reference Manual,” 2023–2025.  
-[3] OpenAI, ChatGPT.
-```
+[1] OASIS, “MQTT Version 3.1.1,” 2014.
 
+[2] Espressif Systems, “ESP32 Technical Reference Manual,” 2023–2025.
+
+[3] OpenAI, ChatGPT.
+
+[4] Tecnopura. “Sensor de ultrasonido distancia HC-SR04 para Arduino.” https://www.tecnopura.com/producto/sensor-de-ultrasonido-distancia-hc-sr04-para-arduino/
+
+[5] Tecnopura. “Base/Soporte para módulo sensor HC-SR04.” https://www.tecnopura.com/producto/base-soporte-para-modulo-sensor-de-ultrasonido-hc-sr04/
+
+[6] W3Schools. “C — Organize Code (Header Files).” https://www.w3schools.com/c/c_organize_code.php
+
+[7] Arduino Project Hub (Isaac100). “Getting started with the HC-SR04 ultrasonic sensor.” https://projecthub.arduino.cc/Isaac100/getting-started-with-the-hc-sr04-ultrasonic-sensor-7cabe1
