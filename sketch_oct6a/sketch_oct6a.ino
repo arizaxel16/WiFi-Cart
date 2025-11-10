@@ -1,27 +1,57 @@
 /*
   ESP32 IoT Car Controller
-  - Servidor HTTP para controlar movimiento (L298N + PWM).
-  - Cliente MQTT para publicar instrucciones y telemetría por tópicos separados.
-  - Mock/lectura real de HC-SR04 publicada periódicamente.
+  HTTP server for motor control + MQTT telemetry publisher
 */
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <PubSubClient.h>
-#include "config.h"   // <---- NUEVO
+#include <ArduinoJson.h>
+
+// ========== CONFIGURATION ==========
+
+// WiFi credentials
+#define WIFI_SSID "iPhone de Juan Pablo"
+#define WIFI_PASS "millos14"
+
+// MQTT broker
+#define MQTT_SERVER "broker.hivemq.com"
+#define MQTT_PORT 1883
+#define MQTT_TOPIC_CMDS "iot_car/commands"
+#define MQTT_TOPIC_TELEM "iot_car/ultrasonic"
+
+// Motor pins (L298N)
+#define ENA_PIN 13  // PWM Right Motor
+#define ENB_PIN 12  // PWM Left Motor
+#define IN1_PIN 14
+#define IN2_PIN 27
+#define IN3_PIN 26
+#define IN4_PIN 25
+
+// Ultrasonic sensor pins (HC-SR04)
+#define TRIG_PIN 35  // Trigger (OUTPUT)
+#define ECHO_PIN 34  // Echo (INPUT) - Use voltage divider to 3.3V
+
+// Sensor configuration
+#define USE_ULTRASONIC_MOCK 1  // 1=simulated, 0=real sensor
+#define ULTRASONIC_PERIOD_MS 1000
+#define ULTRASONIC_TIMEOUT_US 30000
+
+// ========== GLOBAL INSTANCES ==========
 
 WebServer server(80);
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// Estado movimiento
+// Movement state control
 unsigned long moveStopTime = 0;
 bool isMoving = false;
 
-// Telemetría ultrasónica
+// Telemetry timing
 unsigned long nextTelemetryAt = 0;
 
-// ---------- Motores ----------
+// ========== MOTOR CONTROL ==========
+
 void setupMotors() {
   pinMode(IN1_PIN, OUTPUT);
   pinMode(IN2_PIN, OUTPUT);
@@ -29,7 +59,8 @@ void setupMotors() {
   pinMode(IN4_PIN, OUTPUT);
   pinMode(ENA_PIN, OUTPUT);
   pinMode(ENB_PIN, OUTPUT);
-  Serial.println("Motores configurados.");
+  stopMotors();
+  Serial.println("[MOTOR] Initialized");
 }
 
 void stopMotors() {
@@ -40,11 +71,9 @@ void stopMotors() {
   analogWrite(ENA_PIN, 0);
   analogWrite(ENB_PIN, 0);
   isMoving = false;
-  Serial.println("Motores detenidos.");
 }
 
 void moveForward(int speed) {
-  Serial.printf("Moviendo hacia adelante a velocidad %d\n", speed);
   digitalWrite(IN1_PIN, LOW);
   digitalWrite(IN2_PIN, HIGH);
   digitalWrite(IN3_PIN, HIGH);
@@ -54,7 +83,6 @@ void moveForward(int speed) {
 }
 
 void moveBackward(int speed) {
-  Serial.printf("Moviendo hacia atrás a velocidad %d\n", speed);
   digitalWrite(IN1_PIN, HIGH);
   digitalWrite(IN2_PIN, LOW);
   digitalWrite(IN3_PIN, LOW);
@@ -64,7 +92,6 @@ void moveBackward(int speed) {
 }
 
 void turnLeft(int speed) {
-  Serial.printf("Girando a la izquierda a velocidad %d\n", speed);
   digitalWrite(IN1_PIN, HIGH);
   digitalWrite(IN2_PIN, LOW);
   digitalWrite(IN3_PIN, HIGH);
@@ -74,7 +101,6 @@ void turnLeft(int speed) {
 }
 
 void turnRight(int speed) {
-  Serial.printf("Girando a la derecha a velocidad %d\n", speed);
   digitalWrite(IN1_PIN, LOW);
   digitalWrite(IN2_PIN, HIGH);
   digitalWrite(IN3_PIN, LOW);
@@ -83,36 +109,29 @@ void turnRight(int speed) {
   analogWrite(ENB_PIN, speed);
 }
 
-// ---------- WiFi & MQTT ----------
-void setup_wifi() {
-  delay(10);
-  Serial.println();
-  Serial.print("Conectando a ");
-  Serial.println(WIFI_SSID);
+// ========== NETWORK ==========
 
+void setup_wifi() {
+  Serial.printf("[WIFI] Connecting to %s\n", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-
-  Serial.println();
-  Serial.print("WiFi conectado. IP: ");
-  Serial.println(WiFi.localIP());
+  
+  Serial.printf("\n[WIFI] Connected - IP: %s\n", WiFi.localIP().toString().c_str());
 }
 
 void reconnect_mqtt() {
   while (!client.connected()) {
-    Serial.print("Intentando conexión MQTT...");
-    String clientId = "ESP32Client-";
-    clientId += String(random(0xffff), HEX);
+    Serial.print("[MQTT] Connecting...");
+    String clientId = "ESP32Car-" + String(ESP.getEfuseMac(), HEX);
 
     if (client.connect(clientId.c_str())) {
-      Serial.println("conectado");
+      Serial.println("OK");
     } else {
-      Serial.print("falló, rc=");
-      Serial.print(client.state());
-      Serial.println(" reintento en 5s");
+      Serial.printf("FAIL (rc=%d) - Retry in 5s\n", client.state());
       delay(5000);
     }
   }
@@ -123,181 +142,145 @@ void publishMqtt(const char* topic, const String& payload) {
     reconnect_mqtt();
   }
   client.publish(topic, payload.c_str());
-  Serial.printf("MQTT [%s] <- %s\n", topic, payload.c_str());
+  Serial.printf("[MQTT] Published to %s\n", topic);
 }
 
-// ---------- JSON helper ----------
-String getValueFromJson(String json, String key) {
-  String searchKey = "\"" + key + "\":";
-  int keyIndex = json.indexOf(searchKey);
-  if (keyIndex == -1) return "";
+// ========== HTTP HANDLERS ==========
 
-  int valueStartIndex = keyIndex + searchKey.length();
-  while (valueStartIndex < json.length() &&
-         (json.charAt(valueStartIndex) == ' ' || json.charAt(valueStartIndex) == '\t')) {
-    valueStartIndex++;
-  }
-
-  if (json.charAt(valueStartIndex) == '"') {
-    int valueEndIndex = json.indexOf('"', valueStartIndex + 1);
-    if (valueEndIndex == -1) return "";
-    return json.substring(valueStartIndex + 1, valueEndIndex);
-  } else {
-    int valueEndIndex = json.indexOf(',', valueStartIndex);
-    if (valueEndIndex == -1) valueEndIndex = json.indexOf('}', valueStartIndex);
-    if (valueEndIndex == -1) return "";
-    String value = json.substring(valueStartIndex, valueEndIndex);
-    value.trim();
-    return value;
-  }
-}
-
-// ---------- HTTP Handlers ----------
 void handleHealthCheck() {
-  Serial.println("GET /health");
-  server.send(200, "application/json",
-              "{\"status\":\"ok\",\"chip_id\":\"" + String(ESP.getEfuseMac(), HEX) + "\"}");
+  StaticJsonDocument<128> doc;
+  doc["status"] = "ok";
+  doc["chip_id"] = String(ESP.getEfuseMac(), HEX);
+  doc["ip"] = WiFi.localIP().toString();
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
 }
 
 void handleMove() {
-  Serial.println("POST /move");
   if (!server.hasArg("plain")) {
-    server.send(400, "application/json", "{\"error\":\"Cuerpo de la petición vacío\"}");
+    server.send(400, "application/json", "{\"error\":\"Empty body\"}");
     return;
   }
 
-  String body = server.arg("plain");
-  String directionStr = getValueFromJson(body, "direction");
-  String speedStr     = getValueFromJson(body, "speed");
-  String durationStr  = getValueFromJson(body, "duration");
-
-  if (directionStr == "" || speedStr == "" || durationStr == "") {
-    server.send(400, "application/json",
-                "{\"error\":\"JSON inválido o faltan 'direction','speed','duration'\"}");
+  // Parse JSON request
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  
+  if (error) {
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
     return;
   }
 
-  int speed    = speedStr.toInt();
-  int duration = durationStr.toInt();
+  // Extract and validate parameters
+  String direction = doc["direction"] | "";
+  int speed = doc["speed"] | 0;
+  int duration = doc["duration"] | 0;
 
-  if (speed <= 0 || speed > 255 || duration <= 0 || duration > 5000) {
-    server.send(400, "application/json",
-                "{\"error\":\"Parámetros inválidos. 'speed'(1-255), 'duration'(1-5000ms)\"}");
+  if (direction == "" || speed <= 0 || speed > 255 || 
+      duration <= 0 || duration > 5000) {
+    server.send(400, "application/json", 
+                "{\"error\":\"Invalid params: speed(1-255), duration(1-5000ms)\"}");
     return;
   }
 
-  String clientIp = server.client().remoteIP().toString();
-
-  // Publicar en tópico de comandos (igual que antes)
-  String mqttPayload = "{";
-  mqttPayload += "\"direction\":\"" + directionStr + "\",";
-  mqttPayload += "\"speed\":" + String(speed) + ",";
-  mqttPayload += "\"duration\":" + String(duration) + ",";
-  mqttPayload += "\"client_ip\":\"" + clientIp + "\"";
-  mqttPayload += "}";
+  // Publish command to MQTT
+  doc["client_ip"] = server.client().remoteIP().toString();
+  String mqttPayload;
+  serializeJson(doc, mqttPayload);
   publishMqtt(MQTT_TOPIC_CMDS, mqttPayload);
 
-  // Ejecutar movimiento
-  if (directionStr == "forward")       moveForward(speed);
-  else if (directionStr == "backward") moveBackward(speed);
-  else if (directionStr == "right")    turnRight(speed);
-  else if (directionStr == "left")     turnLeft(speed);
+  // Execute movement
+  if (direction == "forward")       moveForward(speed);
+  else if (direction == "backward") moveBackward(speed);
+  else if (direction == "right")    turnRight(speed);
+  else if (direction == "left")     turnLeft(speed);
   else {
-    server.send(400, "application/json",
-                "{\"error\":\"Dirección inválida: 'forward','backward','right','left'\"}");
+    server.send(400, "application/json", 
+                "{\"error\":\"Invalid direction: use forward/backward/left/right\"}");
     return;
   }
 
   isMoving = true;
   moveStopTime = millis() + duration;
 
-  server.send(200, "application/json",
-              "{\"status\":\"movimiento iniciado\",\"details\":" + mqttPayload + "}");
+  server.send(200, "application/json", 
+              "{\"status\":\"moving\",\"details\":" + mqttPayload + "}");
 }
 
-// ---------- HC-SR04 (mock o real) ----------
+void handleNotFound() {
+  String msg = "Not Found\n\nURI: " + server.uri() + 
+               "\nMethod: " + ((server.method() == HTTP_GET) ? "GET" : "POST");
+  server.send(404, "text/plain", msg);
+}
+
+// ========== ULTRASONIC SENSOR ==========
+
 float readUltrasonicCm() {
 #if USE_ULTRASONIC_MOCK
-  // Simulación: 10.00 cm a 250.99 cm (ruido leve)
+  // Mock: random distance with slight noise
   float base = random(1000, 25100) / 100.0f;
   float jitter = random(-10, 10) / 100.0f;
   return max(0.0f, base + jitter);
 #else
-  // Lectura real (asegúrate de divisor de voltaje en ECHO)
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-
-  // Pulso de disparo
+  // Real HC-SR04 reading (ensure voltage divider on ECHO pin)
   digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(3);
+  delayMicroseconds(2);
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  // Duración del eco (us) con timeout
   unsigned long duration = pulseIn(ECHO_PIN, HIGH, ULTRASONIC_TIMEOUT_US);
-  if (duration == 0) {
-    return -1.0f; // timeout / sin lectura
-  }
-
-  // Conversión a centímetros (aprox: us / 58)
-  float distanceCm = duration / 58.0f;
-  return distanceCm;
+  if (duration == 0) return -1.0f; // Timeout
+  
+  return duration / 58.0f; // Convert to cm
 #endif
 }
 
 void publishUltrasonic() {
-  float d = readUltrasonicCm();
+  float distance = readUltrasonicCm();
 
-  String ip   = WiFi.isConnected() ? WiFi.localIP().toString() : String("0.0.0.0");
-  String chip = String(ESP.getEfuseMac(), HEX);
+  StaticJsonDocument<256> doc;
+  
+  // Fix: manejar null correctamente en ArduinoJson
+  if (distance < 0) {
+    doc["distance_cm"] = (char*)0;  // null en ArduinoJson
+  } else {
+    doc["distance_cm"] = distance;
+  }
+  
+  doc["timestamp"] = millis();
+  doc["chip_id"] = String(ESP.getEfuseMac(), HEX);
+  doc["ip"] = WiFi.localIP().toString();
+  doc["mock"] = USE_ULTRASONIC_MOCK;
 
-  String payload = "{";
-  payload += "\"distance_cm\":";
-  if (d < 0) payload += "null"; else payload += String(d, 2);
-  payload += ",\"ts\":" + String((unsigned long)millis());
-  payload += ",\"chip_id\":\"" + chip + "\"";
-  payload += ",\"ip\":\"" + ip + "\"";
-  payload += ",\"mock\":"; payload += (USE_ULTRASONIC_MOCK ? "true" : "false");
-  payload += "}";
-
+  String payload;
+  serializeJson(doc, payload);
   publishMqtt(MQTT_TOPIC_TELEM, payload);
 }
 
-// ---------- NotFound ----------
-void handleNotFound() {
-  String message = "Recurso no encontrado\n\n";
-  message += "URI: " + server.uri();
-  message += "\nMetodo: ";
-  message += (server.method() == HTTP_GET) ? "GET" : "POST";
-  message += "\n";
-  server.send(404, "text/plain", message);
-}
+// ========== SETUP & LOOP ==========
 
-// ---------- Setup/Loop ----------
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
   setupMotors();
-  stopMotors();
-
-  // Pines del sensor (solo si se usa físico; con mock no pasa nada)
+  
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
   setup_wifi();
-
   client.setServer(MQTT_SERVER, MQTT_PORT);
 
   server.on("/health", HTTP_GET, handleHealthCheck);
-  server.on("/move",   HTTP_POST, handleMove);
+  server.on("/move", HTTP_POST, handleMove);
   server.onNotFound(handleNotFound);
 
   server.begin();
-  Serial.println("Servidor HTTP iniciado.");
-  Serial.print("Control: http://");
-  Serial.println(WiFi.localIP());
+  Serial.printf("[HTTP] Server started at http://%s\n", 
+                WiFi.localIP().toString().c_str());
 
   nextTelemetryAt = millis() + ULTRASONIC_PERIOD_MS;
 }
@@ -310,14 +293,14 @@ void loop() {
   }
   client.loop();
 
+  // Auto-stop motors after duration
   if (isMoving && millis() >= moveStopTime) {
     stopMotors();
   }
 
-  // Publicación periódica de telemetría ultrasónica
-  unsigned long now = millis();
-  if ((long)(now - nextTelemetryAt) >= 0) {
+  // Periodic telemetry publishing
+  if ((long)(millis() - nextTelemetryAt) >= 0) {
     publishUltrasonic();
-    nextTelemetryAt = now + ULTRASONIC_PERIOD_MS;
+    nextTelemetryAt = millis() + ULTRASONIC_PERIOD_MS;
   }
 }
