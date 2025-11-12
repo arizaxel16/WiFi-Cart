@@ -1,6 +1,7 @@
 /*
   ESP32 IoT Car Controller
   HTTP server for motor control + MQTT telemetry publisher
+  Versión con pruebas TLS (A/B/C) para CERTIFICATES.md
 */
 
 #include <WiFi.h>
@@ -8,15 +9,32 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 
+// ======== ELEGIR PRUEBA TLS ========
+// 1 = PRUEBA A: puerto 8883 con cliente NO TLS (fallo esperado)
+// 2 = PRUEBA B: TLS SIN CA (fallo esperado por verificación)
+// 3 = PRUEBA C: TLS CON CA (debe funcionar al pegar la CA en certs.h)
+#ifndef TLS_TEST_MODE
+#define TLS_TEST_MODE 3
+#endif
+
+#if TLS_TEST_MODE == 2 || TLS_TEST_MODE == 3
+  #include <WiFiClientSecure.h>
+#endif
+
+#if TLS_TEST_MODE == 3
+  #include "certs.h"   // Contiene ROOT_CA_PEM con la CA raíz en PEM
+#endif
+
 // ========== CONFIGURATION ==========
 
-// WiFi credentials
+// WiFi credentials (solo demo)
 #define WIFI_SSID "iPhone de Juan Pablo"
 #define WIFI_PASS "millos14"
 
 // MQTT broker
 #define MQTT_SERVER "broker.hivemq.com"
-#define MQTT_PORT 1883
+// Para toda la práctica usamos 8883 (MQTT over TLS). En la PRUEBA A mantenemos cliente NO TLS para que falle.
+#define MQTT_PORT 8883
 #define MQTT_TOPIC_CMDS "iot_car/commands"
 #define MQTT_TOPIC_TELEM "iot_car/ultrasonic"
 
@@ -39,8 +57,21 @@
 
 // ========== GLOBAL INSTANCES ==========
 
+// Cliente TCP/TLS según modo
+#if TLS_TEST_MODE == 1
+  // PRUEBA A: cliente NO TLS (fallará al intentar 8883)
+  WiFiClient espClient;
+#elif TLS_TEST_MODE == 2
+  // PRUEBA B: TLS sin CA
+  WiFiClientSecure espClient;
+#elif TLS_TEST_MODE == 3
+  // PRUEBA C: TLS con CA
+  WiFiClientSecure espClient;
+#else
+  #error "TLS_TEST_MODE debe ser 1, 2 o 3"
+#endif
+
 WebServer server(80);
-WiFiClient espClient;
 PubSubClient client(espClient);
 
 // Movement state control
@@ -52,6 +83,16 @@ unsigned long nextTelemetryAt = 0;
 
 // ========== MOTOR CONTROL ==========
 
+void stopMotors() {
+  digitalWrite(IN1_PIN, LOW);
+  digitalWrite(IN2_PIN, LOW);
+  digitalWrite(IN3_PIN, LOW);
+  digitalWrite(IN4_PIN, LOW);
+  analogWrite(ENA_PIN, 0);
+  analogWrite(ENB_PIN, 0);
+  isMoving = false;
+}
+
 void setupMotors() {
   pinMode(IN1_PIN, OUTPUT);
   pinMode(IN2_PIN, OUTPUT);
@@ -61,16 +102,6 @@ void setupMotors() {
   pinMode(ENB_PIN, OUTPUT);
   stopMotors();
   Serial.println("[MOTOR] Initialized");
-}
-
-void stopMotors() {
-  digitalWrite(IN1_PIN, LOW);
-  digitalWrite(IN2_PIN, LOW);
-  digitalWrite(IN3_PIN, LOW);
-  digitalWrite(IN4_PIN, LOW);
-  analogWrite(ENA_PIN, 0);
-  analogWrite(ENB_PIN, 0);
-  isMoving = false;
 }
 
 void moveForward(int speed) {
@@ -114,12 +145,10 @@ void turnRight(int speed) {
 void setup_wifi() {
   Serial.printf("[WIFI] Connecting to %s\n", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  
   Serial.printf("\n[WIFI] Connected - IP: %s\n", WiFi.localIP().toString().c_str());
 }
 
@@ -128,8 +157,10 @@ void reconnect_mqtt() {
     Serial.print("[MQTT] Connecting...");
     String clientId = "ESP32Car-" + String(ESP.getEfuseMac(), HEX);
 
+    // Si el broker requiere usuario/clave, aquí se pondrían.
     if (client.connect(clientId.c_str())) {
       Serial.println("OK");
+      // Podrías suscribirte a topics aquí si fuera necesario.
     } else {
       Serial.printf("FAIL (rc=%d) - Retry in 5s\n", client.state());
       delay(5000);
@@ -141,18 +172,27 @@ void publishMqtt(const char* topic, const String& payload) {
   if (!client.connected()) {
     reconnect_mqtt();
   }
-  client.publish(topic, payload.c_str());
-  Serial.printf("[MQTT] Published to %s\n", topic);
+  if (client.publish(topic, payload.c_str())) {
+    Serial.printf("[MQTT] Published to %s\n", topic);
+  } else {
+    Serial.printf("[MQTT] Publish FAILED to %s\n", topic);
+  }
 }
 
 // ========== HTTP HANDLERS ==========
 
 void handleHealthCheck() {
-  StaticJsonDocument<128> doc;
-  doc["status"] = "ok";
+  StaticJsonDocument<192> doc;
+  doc["status"]   = "ok";
+  doc["tls_mode"] = TLS_TEST_MODE;      // 1=A, 2=B, 3=C
+#if TLS_TEST_MODE == 1
+  doc["transport"] = "tcp:1883->8883 (no TLS)";
+#else
+  doc["transport"] = "tls:8883";
+#endif
   doc["chip_id"] = String(ESP.getEfuseMac(), HEX);
-  doc["ip"] = WiFi.localIP().toString();
-  
+  doc["ip"]      = WiFi.localIP().toString();
+
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
@@ -167,7 +207,6 @@ void handleMove() {
   // Parse JSON request
   StaticJsonDocument<256> doc;
   DeserializationError error = deserializeJson(doc, server.arg("plain"));
-  
   if (error) {
     server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
     return;
@@ -178,9 +217,9 @@ void handleMove() {
   int speed = doc["speed"] | 0;
   int duration = doc["duration"] | 0;
 
-  if (direction == "" || speed <= 0 || speed > 255 || 
+  if (direction == "" || speed <= 0 || speed > 255 ||
       duration <= 0 || duration > 5000) {
-    server.send(400, "application/json", 
+    server.send(400, "application/json",
                 "{\"error\":\"Invalid params: speed(1-255), duration(1-5000ms)\"}");
     return;
   }
@@ -197,20 +236,20 @@ void handleMove() {
   else if (direction == "right")    turnRight(speed);
   else if (direction == "left")     turnLeft(speed);
   else {
-    server.send(400, "application/json", 
+    server.send(400, "application/json",
                 "{\"error\":\"Invalid direction: use forward/backward/left/right\"}");
     return;
   }
 
   isMoving = true;
-  moveStopTime = millis() + duration;
+  moveStopTime = millis() + (unsigned long)duration;
 
-  server.send(200, "application/json", 
+  server.send(200, "application/json",
               "{\"status\":\"moving\",\"details\":" + mqttPayload + "}");
 }
 
 void handleNotFound() {
-  String msg = "Not Found\n\nURI: " + server.uri() + 
+  String msg = "Not Found\n\nURI: " + server.uri() +
                "\nMethod: " + ((server.method() == HTTP_GET) ? "GET" : "POST");
   server.send(404, "text/plain", msg);
 }
@@ -233,7 +272,7 @@ float readUltrasonicCm() {
 
   unsigned long duration = pulseIn(ECHO_PIN, HIGH, ULTRASONIC_TIMEOUT_US);
   if (duration == 0) return -1.0f; // Timeout
-  
+
   return duration / 58.0f; // Convert to cm
 #endif
 }
@@ -242,14 +281,13 @@ void publishUltrasonic() {
   float distance = readUltrasonicCm();
 
   StaticJsonDocument<256> doc;
-  
-  // Fix: manejar null correctamente en ArduinoJson
+
   if (distance < 0) {
     doc["distance_cm"] = (char*)0;  // null en ArduinoJson
   } else {
     doc["distance_cm"] = distance;
   }
-  
+
   doc["timestamp"] = millis();
   doc["chip_id"] = String(ESP.getEfuseMac(), HEX);
   doc["ip"] = WiFi.localIP().toString();
@@ -267,19 +305,37 @@ void setup() {
   delay(1000);
 
   setupMotors();
-  
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
   setup_wifi();
+
+  // ===== Configuración TLS según PRUEBA =====
+#if TLS_TEST_MODE == 1
+  Serial.println("[TLS] PRUEBA A: cliente NO TLS intentando 8883 (fallo esperado).");
+  // espClient = WiFiClient (ya definido arriba); no hay setInsecure ni nada.
+
+#elif TLS_TEST_MODE == 2
+  Serial.println("[TLS] PRUEBA B: WiFiClientSecure SIN CA (fallo esperado por verificación).");
+  // No llamar setInsecure(); queremos que falle por falta de CA.
+  // Tampoco setCACert(); el handshake debe fallar.
+
+#elif TLS_TEST_MODE == 3
+  Serial.println("[TLS] PRUEBA C: WiFiClientSecure CON CA (debe funcionar si la CA es correcta).");
+  // Cargar la CA raíz apropiada (pegar en certs.h)
+  espClient.setCACert(ROOT_CA_PEM);
+  // Si tu core soporta bundle y lo prefieres:
+  // espClient.setCACertBundle(rootCABundle);
+#endif
+
   client.setServer(MQTT_SERVER, MQTT_PORT);
 
+  // HTTP endpoints
   server.on("/health", HTTP_GET, handleHealthCheck);
   server.on("/move", HTTP_POST, handleMove);
   server.onNotFound(handleNotFound);
-
   server.begin();
-  Serial.printf("[HTTP] Server started at http://%s\n", 
+  Serial.printf("[HTTP] Server started at http://%s\n",
                 WiFi.localIP().toString().c_str());
 
   nextTelemetryAt = millis() + ULTRASONIC_PERIOD_MS;
