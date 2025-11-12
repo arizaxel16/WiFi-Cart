@@ -9,6 +9,10 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 
+//#define TLS_TEST_MODE 1  // A: sin TLS (falla en 8883)
+//#define TLS_TEST_MODE 2  // B: TLS sin CA (falla verificación)
+
+
 // ======== ELEGIR PRUEBA TLS ========
 // 1 = PRUEBA A: puerto 8883 con cliente NO TLS (fallo esperado)
 // 2 = PRUEBA B: TLS SIN CA (fallo esperado por verificación)
