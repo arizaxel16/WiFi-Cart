@@ -1,76 +1,62 @@
 // config.h
+// Configuration file for ESP32 IoT Car Controller
+// Modify these values according to your setup
+
+#ifndef CONFIG_H
+#define CONFIG_H
+
 // ============================================
-// Configuración por preprocesador (override por -D al compilar)
+// FIRMWARE INFO
 // ============================================
+#define FIRMWARE_VERSION "2.0.0"
 
-// --------- WIFI ----------
-#ifndef WIFI_SSID
-#define WIFI_SSID "iPhone de Juan Pablo"
-#endif
+// ============================================
+// WIFI CONFIGURATION
+// ============================================
+// ⚠️ CHANGE THESE TO YOUR WIFI CREDENTIALS
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASS "YOUR_WIFI_PASSWORD"
 
-#ifndef WIFI_PASS
-#define WIFI_PASS "millos14"
-#endif
-
-// --------- MQTT ----------
-#ifndef MQTT_SERVER
+// ============================================
+// MQTT CONFIGURATION
+// ============================================
 #define MQTT_SERVER "broker.hivemq.com"
-#endif
+#define MQTT_PORT 8883  // TLS encrypted port
 
-#ifndef MQTT_PORT
-#define MQTT_PORT 1883
-#endif
-
-// Tópico de comandos (movimiento) — ya existente en tu sketch
-#ifndef MQTT_TOPIC_CMDS
 #define MQTT_TOPIC_CMDS "iot_car/commands"
-#endif
+#define MQTT_TOPIC_TELEM "iot_car/telemetry"
+#define MQTT_TOPIC_STATUS "iot_car/status"
 
-// Tópico de telemetría (NUEVO y DIFERENTE al de comandos)
-#ifndef MQTT_TOPIC_TELEM
-#define MQTT_TOPIC_TELEM "iot_car/ultrasonic"
-#endif
+// ============================================
+// MOTOR PINS (L298N Driver)
+// ============================================
+#define ENA_PIN 13   // PWM Right Motor (Enable A)
+#define ENB_PIN 12   // PWM Left Motor (Enable B)
+#define IN1_PIN 14   // Motor A Direction 1
+#define IN2_PIN 27   // Motor A Direction 2
+#define IN3_PIN 26   // Motor B Direction 1
+#define IN4_PIN 25   // Motor B Direction 2
 
-// --------- Pines Motores L298N ----------
-#ifndef ENA_PIN
-#define ENA_PIN 13   // PWM Motor Derecho
-#endif
-#ifndef ENB_PIN
-#define ENB_PIN 12   // PWM Motor Izquierdo
-#endif
-#ifndef IN1_PIN
-#define IN1_PIN 14
-#endif
-#ifndef IN2_PIN
-#define IN2_PIN 27
-#endif
-#ifndef IN3_PIN
-#define IN3_PIN 26
-#endif
-#ifndef IN4_PIN
-#define IN4_PIN 25
-#endif
+// ============================================
+// ULTRASONIC SENSOR (HC-SR04)
+// ============================================
+// ⚠️ IMPORTANT: GPIO 34, 35, 36, 39 are INPUT-ONLY on ESP32!
+// TRIG needs to be an OUTPUT-capable pin
+#define TRIG_PIN 32  // Trigger (OUTPUT)
+#define ECHO_PIN 33  // Echo (INPUT) - Use voltage divider to 3.3V!
 
-// --------- HC-SR04 ----------
-#ifndef TRIG_PIN
-#define TRIG_PIN 35  // Trigger (OUTPUT)
-#endif
-#ifndef ECHO_PIN
-#define ECHO_PIN 34  // Echo (INPUT) -> Debe bajar a 3.3V con divisor
-#endif
+// Sensor mode: 1 = simulated/mock, 0 = real HC-SR04
+#define USE_ULTRASONIC_MOCK 0  // Set to 1 for testing without sensor
 
-// Usa mock o sensor físico
-// 1 = simulado, 0 = leer sensor real
-#ifndef USE_ULTRASONIC_MOCK
-#define USE_ULTRASONIC_MOCK 1
-#endif
-
-// Período de publicación de telemetría (ms)
-#ifndef ULTRASONIC_PERIOD_MS
+// Telemetry publish interval (milliseconds)
 #define ULTRASONIC_PERIOD_MS 1000
-#endif
 
-// Timeout de medición (us) para pulseIn (cuando se usa sensor real)
-#ifndef ULTRASONIC_TIMEOUT_US
+// Pulse timeout for pulseIn() (microseconds)
+// 30000µs = ~5m max range
 #define ULTRASONIC_TIMEOUT_US 30000
-#endif
+
+// Obstacle detection threshold (centimeters)
+// Car will refuse to move forward if obstacle closer than this
+#define OBSTACLE_THRESHOLD_CM 20.0f
+
+#endif // CONFIG_H
