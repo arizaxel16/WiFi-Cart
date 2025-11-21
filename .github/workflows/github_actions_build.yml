@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, master ]
     paths:
-      - 'esp32_iot_car/**'
+      - 'sketch_oct6a/**'
       - '.github/workflows/**'
   pull_request:
     branches: [ main, master ]
@@ -37,14 +37,14 @@ jobs:
       - name: Verify Sketch Files Exist
         run: |
           echo "Checking required files..."
-          ls -la esp32_iot_car/
+          ls -la sketch_oct6a/
           
-          if [ ! -f "esp32_iot_car/esp32_iot_car.ino" ]; then
+          if [ ! -f "sketch_oct6a/sketch_oct6a.ino" ]; then
             echo "❌ Main sketch file missing!"
             exit 1
           fi
           
-          if [ ! -f "esp32_iot_car/config.h" ]; then
+          if [ ! -f "sketch_oct6a/config.h" ]; then
             echo "❌ config.h missing!"
             exit 1
           fi
@@ -55,7 +55,7 @@ jobs:
         run: |
           echo "Validating config.h..."
           
-          if grep -q "YOUR_WIFI_SSID\|iPhone de Juan Pablo" esp32_iot_car/config.h; then
+          if grep -q "YOUR_WIFI_SSID\|iPhone de Juan Pablo" sketch_oct6a/config.h; then
             echo "✅ WiFi credentials are placeholder or example"
           else
             echo "⚠️ WiFi credentials may be real - check config.h"
@@ -69,7 +69,7 @@ jobs:
             --build-property "build.extra_flags=-DWIFI_SSID=\\\"CI_BUILD\\\" -DWIFI_PASS=\\\"CI_BUILD\\\" -DUSE_ULTRASONIC_MOCK=1" \
             --output-dir ./build \
             --warnings all \
-            esp32_iot_car/
+            sketch_oct6a/
           
           echo "✅ Compilation successful!"
 
@@ -78,7 +78,7 @@ jobs:
           echo "## 💾 Memory Usage Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ -f "./build/esp32_iot_car.ino.elf" ]; then
+          if [ -f "./build/sketch_oct6a.ino.elf" ]; then
             echo "### Binary Files Generated:" >> $GITHUB_STEP_SUMMARY
             ls -lh ./build/*.bin ./build/*.elf 2>/dev/null | awk '{print "- " $9 ": " $5}' >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
@@ -89,8 +89,8 @@ jobs:
           echo "- Partition Scheme: Default (1.2MB APP / 1.5MB SPIFFS)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ -f "./build/esp32_iot_car.ino.bin" ]; then
-            BIN_SIZE=$(stat -c%s "./build/esp32_iot_car.ino.bin" 2>/dev/null || stat -f%z "./build/esp32_iot_car.ino.bin" 2>/dev/null)
+          if [ -f "./build/sketch_oct6a.ino.bin" ]; then
+            BIN_SIZE=$(stat -c%s "./build/sketch_oct6a.ino.bin" 2>/dev/null || stat -f%z "./build/sketch_oct6a.ino.bin" 2>/dev/null)
             BIN_SIZE_KB=$((BIN_SIZE / 1024))
             MAX_SIZE=1310720
             PERCENTAGE=$((BIN_SIZE * 100 / MAX_SIZE))
@@ -112,8 +112,8 @@ jobs:
         with:
           name: esp32-firmware-${{ github.sha }}
           path: |
-            ./build/esp32_iot_car.ino.bin
-            ./build/esp32_iot_car.ino.elf
+            ./build/sketch_oct6a.ino.bin
+            ./build/sketch_oct6a.ino.elf
           retention-days: 30
 
       - name: Upload Bootloader Files
@@ -121,8 +121,8 @@ jobs:
         with:
           name: esp32-bootloader-${{ github.sha }}
           path: |
-            ./build/esp32_iot_car.ino.bootloader.bin
-            ./build/esp32_iot_car.ino.partitions.bin
+            ./build/sketch_oct6a.ino.bootloader.bin
+            ./build/sketch_oct6a.ino.partitions.bin
           retention-days: 30
 
   code-quality:
@@ -138,14 +138,14 @@ jobs:
           echo "## 🔍 Code Quality Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          FUNCTIONS=$(grep -c "^void\|^bool\|^float\|^String" esp32_iot_car/esp32_iot_car.ino || echo "0")
+          FUNCTIONS=$(grep -c "^void\|^bool\|^float\|^String" sketch_oct6a/sketch_oct6a.ino || echo "0")
           echo "- Functions defined: $FUNCTIONS" >> $GITHUB_STEP_SUMMARY
           
-          DEBUG_PRINTS=$(grep -c "Serial.print" esp32_iot_car/esp32_iot_car.ino || echo "0")
+          DEBUG_PRINTS=$(grep -c "Serial.print" sketch_oct6a/sketch_oct6a.ino || echo "0")
           echo "- Debug print statements: $DEBUG_PRINTS" >> $GITHUB_STEP_SUMMARY
           
-          INO_SIZE=$(wc -l < esp32_iot_car/esp32_iot_car.ino)
-          CONFIG_SIZE=$(wc -l < esp32_iot_car/config.h)
+          INO_SIZE=$(wc -l < sketch_oct6a/sketch_oct6a.ino)
+          CONFIG_SIZE=$(wc -l < sketch_oct6a/config.h)
           
           echo "- Main file lines: $INO_SIZE" >> $GITHUB_STEP_SUMMARY
           echo "- Config file lines: $CONFIG_SIZE" >> $GITHUB_STEP_SUMMARY
@@ -153,7 +153,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Security Checks:" >> $GITHUB_STEP_SUMMARY
           
-          if grep -q "YOUR_WIFI\|iPhone de Juan Pablo" esp32_iot_car/config.h; then
+          if grep -q "YOUR_WIFI\|iPhone de Juan Pablo" sketch_oct6a/config.h; then
             echo "✅ WiFi credentials use placeholders" >> $GITHUB_STEP_SUMMARY
           else
             echo "⚠️ Check WiFi credentials in config.h" >> $GITHUB_STEP_SUMMARY
@@ -164,12 +164,12 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Development Notes:" >> $GITHUB_STEP_SUMMARY
           
-          TODOS=$(grep -r "TODO\|FIXME\|XXX\|HACK" esp32_iot_car/ 2>/dev/null | wc -l || echo "0")
+          TODOS=$(grep -r "TODO\|FIXME\|XXX\|HACK" sketch_oct6a/ 2>/dev/null | wc -l || echo "0")
           
           if [ "$TODOS" -gt "0" ]; then
             echo "⚠️ Found $TODOS TODO/FIXME comments:" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            grep -rn "TODO\|FIXME\|XXX" esp32_iot_car/ 2>/dev/null | head -10 >> $GITHUB_STEP_SUMMARY || true
+            grep -rn "TODO\|FIXME\|XXX" sketch_oct6a/ 2>/dev/null | head -10 >> $GITHUB_STEP_SUMMARY || true
             echo '```' >> $GITHUB_STEP_SUMMARY
           else
             echo "✅ No pending TODO items" >> $GITHUB_STEP_SUMMARY
@@ -198,14 +198,14 @@ jobs:
             echo "⚠️ README.md missing (recommended)" >> $GITHUB_STEP_SUMMARY
           fi
           
-          if [ -f "esp32_iot_car/esp32_iot_car.ino" ]; then
+          if [ -f "sketch_oct6a/sketch_oct6a.ino" ]; then
             echo "✅ Main sketch present" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ Main sketch MISSING" >> $GITHUB_STEP_SUMMARY
             MISSING=$((MISSING+1))
           fi
           
-          if [ -f "esp32_iot_car/config.h" ]; then
+          if [ -f "sketch_oct6a/config.h" ]; then
             echo "✅ config.h present" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ config.h MISSING" >> $GITHUB_STEP_SUMMARY
@@ -250,7 +250,7 @@ jobs:
       - name: Get Version from config.h
         id: version
         run: |
-          VERSION=$(grep 'FIRMWARE_VERSION' esp32_iot_car/config.h | cut -d'"' -f2)
+          VERSION=$(grep 'FIRMWARE_VERSION' sketch_oct6a/config.h | cut -d'"' -f2)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Detected firmware version: $VERSION"
 
@@ -267,44 +267,39 @@ jobs:
             **Commit:** ${{ github.sha }}
             
             ### 📦 What's Included
-            - `esp32_iot_car.ino.bin` - Compiled firmware binary
-            - `esp32_iot_car.ino.elf` - ELF file for debugging
+            - `sketch_oct6a.ino.bin` - Compiled firmware binary
+            - `sketch_oct6a.ino.elf` - ELF file for debugging
             
             ### ✨ Features
             - ✅ HTTP API for motor control
             - ✅ HC-SR04 ultrasonic sensor integration
-            - ✅ Obstacle detection (20cm threshold)
+            - ✅ Obstacle detection
             - ✅ Embedded web interface (React)
             - ✅ Real-time telemetry
             
             ### 🔧 Installation
             
             **Method 1: Arduino IDE**
-            1. Download `esp32_iot_car.ino.bin`
+            1. Download `sketch_oct6a.ino.bin`
             2. Tools → Port → Select your ESP32
             3. Sketch → Upload Using Programmer
             
             **Method 2: esptool.py**
-```bash
-            esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 write_flash -z 0x10000 esp32_iot_car.ino.bin
-```
-            
-            **Windows:**
-```bash
-            esptool.py --chip esp32 --port COM3 --baud 460800 write_flash -z 0x10000 esp32_iot_car.ino.bin
-```
+            ```bash
+            esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 write_flash -z 0x10000 sketch_oct6a.ino.bin
+            ```
             
             ### ⚙️ Configuration
             Before first use, update `config.h`:
             - WiFi SSID and Password
-            - Motor pins (if different from default)
-            - Sensor pins (D32=TRIG, D33=ECHO)
+            - Motor pins
+            - Sensor pins
             
             ### 📝 Changelog
             See commit history for details.
           files: |
-            ./release/esp32_iot_car.ino.bin
-            ./release/esp32_iot_car.ino.elf
+            ./release/sketch_oct6a.ino.bin
+            ./release/sketch_oct6a.ino.elf
           draft: false
           prerelease: false
         env:
