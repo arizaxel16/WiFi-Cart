@@ -1,6 +1,6 @@
 /*
-  ESP32 IoT Car Controller - WORKING VERSION
-  HTTP server for motor control
+  ESP32 IoT Car Controller - FINAL VERSION
+  HTTP server + Full Sensor Telemetry
   NO MQTT - Pure HTTP only
   
   For Arduino IDE - ESP32 Board
@@ -19,6 +19,10 @@ unsigned long moveStopTime = 0;
 bool isMoving = false;
 String lastDirection = "stopped";
 int lastSpeed = 0;
+
+// Sensor telemetry timing
+unsigned long lastSensorRead = 0;
+const unsigned long SENSOR_READ_INTERVAL = 500; // Leer sensor cada 500ms
 
 // Distance reading
 float lastDistanceCm = -1.0f;
@@ -117,12 +121,14 @@ float readUltrasonicCm() {
   unsigned long duration = pulseIn(ECHO_PIN, HIGH, ULTRASONIC_TIMEOUT_US);
   
   if (duration == 0) {
+    Serial.println("[SENSOR] Timeout - no echo");
     return -1.0f;
   }
   
   float distance = duration / 58.0f;
   
   if (distance < 2.0f || distance > 400.0f) {
+    Serial.printf("[SENSOR] Out of range: %.2f cm\n", distance);
     return -1.0f;
   }
   
@@ -143,8 +149,12 @@ void setupUltrasonic() {
 }
 
 bool checkObstacle() {
-  lastDistanceCm = readUltrasonicCm();
-  if (lastDistanceCm > 0 && lastDistanceCm < OBSTACLE_THRESHOLD_CM) {
+  // Leer sensor en tiempo real para verificar obstáculo
+  float currentDistance = readUltrasonicCm();
+  lastDistanceCm = currentDistance; // Actualizar última lectura
+  
+  if (currentDistance > 0 && currentDistance < OBSTACLE_THRESHOLD_CM) {
+    Serial.printf("[SENSOR] OBSTACLE DETECTED at %.2f cm!\n", currentDistance);
     return true;
   }
   return false;
@@ -192,7 +202,6 @@ void handleHealthCheck() {
   String response;
   serializeJson(doc, response);
   
-  // Add CORS headers explicitly
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", response);
 }
@@ -200,14 +209,12 @@ void handleHealthCheck() {
 void handleMove() {
   Serial.println("[HTTP] Move command received");
   
-  // Add CORS headers for all responses
   server.sendHeader("Access-Control-Allow-Origin", "*");
   
   String direction = "";
   int speed = 0;
   int duration = 0;
 
-  // Handle POST with JSON body
   if (server.method() == HTTP_POST) {
     if (!server.hasArg("plain")) {
       Serial.println("[HTTP] Empty POST body");
@@ -231,7 +238,6 @@ void handleMove() {
     speed = doc["speed"] | 0;
     duration = doc["duration"] | 0;
   } 
-  // Handle GET with query params
   else if (server.method() == HTTP_GET) {
     direction = server.arg("direction");
     speed = server.arg("speed").toInt();
@@ -249,10 +255,12 @@ void handleMove() {
     return;
   }
 
-  // Check for obstacles before moving forward
+  // Check for obstacles ONLY when moving forward
   if (direction == "forward") {
     if (checkObstacle()) {
-      Serial.printf("[HTTP] Obstacle detected at %.2f cm\n", lastDistanceCm);
+      Serial.printf("[HTTP] BLOCKED! Obstacle at %.2f cm (threshold: %.2f cm)\n", 
+                    lastDistanceCm, OBSTACLE_THRESHOLD_CM);
+      
       StaticJsonDocument<256> errorDoc;
       errorDoc["error"] = "Obstacle detected";
       errorDoc["distance_cm"] = lastDistanceCm;
@@ -292,7 +300,6 @@ void handleMove() {
   isMoving = true;
   moveStopTime = millis() + (unsigned long)duration;
 
-  // Build response
   StaticJsonDocument<384> responseDoc;
   responseDoc["status"] = "moving";
   responseDoc["direction"] = direction;
@@ -303,14 +310,14 @@ void handleMove() {
   String response;
   serializeJson(responseDoc, response);
   
-  Serial.println("[HTTP] Sending response...");
-  server.send(200, "application/json", response);
   Serial.println("[HTTP] Response sent successfully");
+  server.send(200, "application/json", response);
 }
 
 void handleGetStatus() {
   Serial.println("[HTTP] Status requested");
   
+  // Leer sensor en tiempo real
   lastDistanceCm = readUltrasonicCm();
   
   StaticJsonDocument<256> doc;
@@ -321,10 +328,17 @@ void handleGetStatus() {
   doc["obstacle_detected"] = (lastDistanceCm > 0 && lastDistanceCm < OBSTACLE_THRESHOLD_CM);
 
   String response;
-  serializeJson(doc, response);  // Serializar el documento JSON en el string
+  serializeJson(doc, response);
   
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", response);
+  
+  // Log de telemetría
+  if (lastDistanceCm > 0) {
+    Serial.printf("[SENSOR] Distance: %.2f cm | Obstacle: %s\n", 
+                  lastDistanceCm, 
+                  (lastDistanceCm < OBSTACLE_THRESHOLD_CM) ? "YES" : "NO");
+  }
 }
 
 void handleNotFound() {
@@ -341,90 +355,234 @@ void handleCORS() {
   server.send(204);
 }
 
-// ========== SETUP & LOOP ==========
-
-// Agregar ANTES de setup()
+// ========== HTML INTERFACE ==========
 const char HTML_PAGE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32 Car</title>
+    <title>ESP32 Pro Controller</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <style>
-        body{font-family:Arial;background:#667eea;margin:0;padding:20px;display:flex;justify-content:center;align-items:center;min-height:100vh}
-        .container{background:#fff;border-radius:20px;padding:30px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3)}
-        h1{text-align:center;color:#333;margin-bottom:30px}
-        .status{background:#d4edda;padding:15px;border-radius:10px;text-align:center;margin-bottom:20px;font-weight:bold;color:#155724}
-        .controls{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px}
-        button{padding:30px 20px;font-size:16px;font-weight:bold;border:none;border-radius:10px;cursor:pointer;background:#667eea;color:#fff;box-shadow:0 4px 6px rgba(0,0,0,0.1)}
-        button:active{transform:scale(0.95)}
-        .btn-forward{grid-column:2;background:#4CAF50}
-        .btn-stop{grid-column:span 3;background:#f44336;font-size:18px}
-        .btn-left,.btn-right{background:#2196F3}
-        .btn-backward{grid-column:2;background:#FF9800}
-        .speed-control{margin-bottom:20px}
-        .speed-control label{display:block;margin-bottom:10px;font-weight:bold}
-        #speed{width:100%;height:40px}
-        #speedValue{display:block;text-align:center;font-size:32px;font-weight:bold;color:#667eea;margin-top:10px}
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
     </style>
 </head>
-<body>
-    <div class="container">
-        <h1>🚗 ESP32 Car</h1>
-        <div id="status" class="status">Listo</div>
-        <div class="speed-control">
-            <label>⚡ Velocidad</label>
-            <input type="range" id="speed" min="100" max="255" value="180" step="5">
-            <span id="speedValue">180</span>
-        </div>
-        <div class="controls">
-            <div></div>
-            <button class="btn-forward" onclick="move('forward')">⬆️ ADELANTE</button>
-            <div></div>
-            <button class="btn-left" onclick="move('left')">⬅️ IZQUIERDA</button>
-            <button class="btn-stop" onclick="move('stop')">⛔ STOP</button>
-            <button class="btn-right" onclick="move('right')">➡️ DERECHA</button>
-            <div></div>
-            <button class="btn-backward" onclick="move('backward')">⬇️ ATRÁS</button>
-            <div></div>
-        </div>
-    </div>
-    <script>
-        let moving=false;
-        document.getElementById('speed').oninput=function(){document.getElementById('speedValue').textContent=this.value};
-        function setStatus(msg){document.getElementById('status').textContent=msg}
-        async function move(dir){
-            if(moving&&dir!=='stop')return;
-            const speed=parseInt(document.getElementById('speed').value);
-            const dur=dir==='stop'?100:2000;
-            setStatus('Moviendo '+dir+'...');
-            moving=true;
-            try{
-                const res=await fetch('/api/v1/move',{
-                    method:'POST',
-                    headers:{'Content-Type':'application/json'},
-                    body:JSON.stringify({direction:dir,speed:speed,duration:dur})
-                });
-                const data=await res.json();
-                setStatus('✅ '+dir.toUpperCase());
-                if(dir!=='stop')setTimeout(()=>{moving=false;setStatus('Listo')},dur+200);
-                else{moving=false;setStatus('Detenido')}
-            }catch(e){
-                setStatus('❌ Error: '+e.message);
-                moving=false;
-            }
-        }
+<body class="bg-slate-900 text-slate-100">
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const Icon = ({ children, className, size = 24 }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>{children}</svg>
+        );
+        const ArrowUp = (p) => <Icon {...p}><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></Icon>;
+        const ArrowDown = (p) => <Icon {...p}><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></Icon>;
+        const ArrowLeft = (p) => <Icon {...p}><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></Icon>;
+        const ArrowRight = (p) => <Icon {...p}><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></Icon>;
+        const StopCircle = (p) => <Icon {...p}><circle cx="12" cy="12" r="10"/><rect width="6" height="6" x="9" y="9"/></Icon>;
+        const Wifi = (p) => <Icon {...p}><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></Icon>;
+        const Activity = (p) => <Icon {...p}><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></Icon>;
+        const Settings = (p) => <Icon {...p}><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></Icon>;
+        const AlertTriangle = (p) => <Icon {...p}><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></Icon>;
+        const Terminal = (p) => <Icon {...p}><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></Icon>;
+
+        const App = () => {
+            const [ipAddress, setIpAddress] = useState(window.location.hostname || '192.168.4.1');
+            const [speed, setSpeed] = useState(150);
+            const [duration, setDuration] = useState(2000);
+            
+            const [isConnected, setIsConnected] = useState(false);
+            const [sensorData, setSensorData] = useState({ distance: -1, motorState: 'stopped', obstacle: false });
+            const [logs, setLogs] = useState([]);
+            const [isKeyboardEnabled, setIsKeyboardEnabled] = useState(true);
+            const [isLoading, setIsLoading] = useState(false);
+            const logsEndRef = useRef(null);
+
+            useEffect(() => logsEndRef.current?.scrollIntoView({ behavior: "smooth" }), [logs]);
+
+            const addLog = (msg, type = 'info') => {
+                const time = new Date().toLocaleTimeString().split(' ')[0];
+                setLogs(prev => [...prev.slice(-14), { time, msg, type }]); 
+            };
+
+            const sendCommand = async (endpoint, method = 'GET', body = null) => {
+                const url = `/api/v1/${endpoint}`;
+                
+                setIsLoading(true);
+                try {
+                    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+                    if (body) opts.body = JSON.stringify(body);
+                    
+                    const res = await fetch(url, opts);
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    
+                    const data = await res.json();
+                    if (data.error) {
+                        addLog(`⚠️ ${data.error}`, 'warning');
+                        if (data.distance_cm) {
+                            addLog(`Obstacle at ${data.distance_cm.toFixed(1)} cm`, 'warning');
+                        }
+                    } else if(method === 'POST') {
+                        addLog(`${method} ${endpoint} OK`, 'success');
+                    }
+                    setIsConnected(true);
+                    return data;
+                } catch (error) {
+                    addLog(`Err: ${error.message}`, 'error');
+                    setIsConnected(false);
+                    return null;
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const handleMove = (dir) => sendCommand('move', 'POST', { direction: dir, speed: parseInt(speed), duration: parseInt(duration) });
+            const handleStop = () => sendCommand('move', 'POST', { direction: 'stop', speed: 0, duration: 100 });
+
+            // Polling de estado cada 1 segundo
+            useEffect(() => {
+                const interval = setInterval(async () => {
+                    try {
+                        const res = await fetch('/api/v1/status');
+                        if (res.ok) {
+                            const data = await res.json();
+                            setSensorData({ 
+                                distance: data.last_distance_cm, 
+                                motorState: data.motor_state, 
+                                obstacle: data.obstacle_detected 
+                            });
+                            setIsConnected(true);
+                        }
+                    } catch (e) { setIsConnected(false); }
+                }, 1000);
+                return () => clearInterval(interval);
+            }, []);
+
+            // Teclado
+            useEffect(() => {
+                const handleKey = (e) => {
+                    if (!isKeyboardEnabled || isLoading) return;
+                    if (e.repeat) return;
+                    
+                    const map = { 
+                        'ArrowUp': 'forward', 'w': 'forward', 'W': 'forward',
+                        'ArrowDown': 'backward', 's': 'backward', 'S': 'backward',
+                        'ArrowLeft': 'left', 'a': 'left', 'A': 'left',
+                        'ArrowRight': 'right', 'd': 'right', 'D': 'right',
+                        ' ': 'stop', 'Escape': 'stop'
+                    };
+                    
+                    if (map[e.key]) {
+                        e.preventDefault();
+                        if (map[e.key] === 'stop') handleStop();
+                        else handleMove(map[e.key]);
+                    }
+                };
+                window.addEventListener('keydown', handleKey);
+                return () => window.removeEventListener('keydown', handleKey);
+            }, [isKeyboardEnabled, speed, duration, isLoading]);
+
+            return (
+                <div className="min-h-screen p-4 md:p-6 flex flex-col items-center">
+                    <div className="w-full max-w-4xl space-y-6">
+                        <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4 shadow-lg">
+                            <div className="flex items-center gap-3">
+                                <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
+                                <h1 className="text-xl md:text-2xl font-bold bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent">ESP32 CAR REMOTE</h1>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                            <div className="lg:col-span-7 space-y-6">
+                                <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl relative">
+                                    <button onClick={() => setIsKeyboardEnabled(!isKeyboardEnabled)} className={`absolute top-4 right-4 p-2 rounded-lg transition-colors ${isKeyboardEnabled ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400'}`}>
+                                        <span className="text-xs font-bold">KEYBOARD {isKeyboardEnabled ? 'ON' : 'OFF'}</span>
+                                    </button>
+
+                                    <div className="grid grid-cols-3 gap-3 max-w-[280px] mx-auto mt-4">
+                                        <div className="col-start-2"><Btn icon={<ArrowUp size={32}/>} onClick={() => handleMove('forward')} label="W" disabled={isLoading} /></div>
+                                        <div className="col-start-1 row-start-2"><Btn icon={<ArrowLeft size={32}/>} onClick={() => handleMove('left')} label="A" disabled={isLoading} /></div>
+                                        <div className="col-start-2 row-start-2"><Btn icon={<StopCircle size={32}/>} onClick={handleStop} color="red" label="SPACE" /></div>
+                                        <div className="col-start-3 row-start-2"><Btn icon={<ArrowRight size={32}/>} onClick={() => handleMove('right')} label="D" disabled={isLoading} /></div>
+                                        <div className="col-start-2 row-start-3"><Btn icon={<ArrowDown size={32}/>} onClick={() => handleMove('backward')} label="S" disabled={isLoading} /></div>
+                                    </div>
+                                    
+                                    <div className="mt-6 text-center">
+                                        <span className="text-slate-400 text-sm">Estado Motor: </span>
+                                        <span className={`font-mono font-bold uppercase ${sensorData.motorState === 'stopped' ? 'text-slate-500' : 'text-cyan-400'}`}>{sensorData.motorState}</span>
+                                    </div>
+                                </div>
+
+                                <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-4">
+                                    <div className="flex items-center gap-2 text-slate-300 mb-1"><Settings size={16} /><span className="text-sm font-bold">CONFIGURACIÓN</span></div>
+                                    <Slider label="Velocidad (PWM)" val={speed} set={setSpeed} min="80" max="255" unit="" />
+                                    <Slider label="Duración Pulso" val={duration} set={setDuration} min="100" max="3000" step="100" unit="ms" />
+                                </div>
+                            </div>
+
+                            <div className="lg:col-span-5 space-y-6 h-full flex flex-col">
+                                <div className="bg-slate-800 p-5 rounded-xl border border-slate-700">
+                                    <div className="flex items-center gap-2 text-slate-300 mb-4"><Activity size={16} /><span className="text-sm font-bold">SENSOR SONAR HC-SR04</span></div>
+                                    <div className="flex items-center justify-between bg-slate-900 p-4 rounded-lg border border-slate-700">
+                                        <div>
+                                            <div className="text-3xl font-mono font-bold text-white">{sensorData.distance > 0 ? sensorData.distance.toFixed(1) : '--'}<span className="text-sm text-slate-500 ml-1">cm</span></div>
+                                            <div className="text-xs text-slate-500 mt-1">Rango: 2-400cm | Threshold: 20cm</div>
+                                        </div>
+                                        {sensorData.obstacle ? 
+                                            <div className="text-red-500 flex flex-col items-center animate-bounce"><AlertTriangle size={28}/><span className="text-[10px] font-bold">OBSTÁCULO</span></div> : 
+                                            <div className="h-10 w-1.5 bg-slate-700 rounded-full overflow-hidden relative"><div className="absolute bottom-0 w-full bg-cyan-500 transition-all duration-300" style={{height: `${Math.min(sensorData.distance, 100)}%`}}></div></div>
+                                        }
+                                    </div>
+                                </div>
+
+                                <div className="bg-slate-900 rounded-xl border border-slate-700 flex-1 overflow-hidden flex flex-col min-h-[200px]">
+                                    <div className="bg-slate-800 px-4 py-2 border-b border-slate-700 flex items-center gap-2"><Terminal size={14} className="text-slate-400"/><span className="text-xs font-mono text-slate-300">SISTEMA</span></div>
+                                    <div className="p-3 overflow-y-auto font-mono text-[10px] md:text-xs space-y-1 flex-1">
+                                        {logs.map((l, i) => (
+                                            <div key={i} className="flex gap-2"><span className="text-slate-600">[{l.time}]</span><span className={l.type==='error'?'text-red-400':l.type==='success'?'text-green-400':l.type==='warning'?'text-yellow-400':'text-slate-300'}>{l.msg}</span></div>
+                                        ))}
+                                        <div ref={logsEndRef} />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const Btn = ({ icon, onClick, color, label, disabled }) => (
+            <button onClick={onClick} disabled={disabled} className={`w-full aspect-square rounded-xl flex flex-col items-center justify-center text-white shadow-lg active:scale-95 transition-transform disabled:opacity-50 disabled:cursor-not-allowed ${color === 'red' ? 'bg-rose-600 hover:bg-rose-500 shadow-rose-900/50' : 'bg-blue-600 hover:bg-blue-500 shadow-blue-900/50'}`}>
+                {icon}{label && <span className="text-[10px] font-bold opacity-50 mt-1">{label}</span>}
+            </button>
+        );
+
+        const Slider = ({ label, val, set, min, max, step=1, unit }) => (
+            <div className="space-y-1">
+                <div className="flex justify-between text-xs text-slate-400"><span>{label}</span><span>{val}{unit}</span></div>
+                <input type="range" min={min} max={max} step={step} value={val} onChange={e => set(e.target.value)} className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500" />
+            </div>
+        );
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     </script>
 </body>
 </html>
 )rawliteral";
 
-// Agregar esta función handler
 void handleRoot() {
   Serial.println("[HTTP] Serving web interface");
   server.send(200, "text/html", HTML_PAGE);
 }
+
+// ========== SETUP & LOOP ==========
 
 void setup() {
   Serial.begin(115200);
@@ -438,8 +596,6 @@ void setup() {
   setupWifi();
 
   server.on("/", HTTP_GET, handleRoot);
-
-  // HTTP server with CORS support
   server.on("/api/v1/healthcheck", HTTP_GET, handleHealthCheck);
   server.on("/api/v1/move", HTTP_POST, handleMove);
   server.on("/api/v1/move", HTTP_GET, handleMove);
@@ -449,24 +605,26 @@ void setup() {
   server.on("/api/v1/status", HTTP_OPTIONS, handleCORS);
   server.onNotFound(handleNotFound);
 
-  // Enable CORS globally
   server.enableCORS(true);
 
   server.begin();
   Serial.printf("\n[HTTP] Server started at http://%s\n", WiFi.localIP().toString().c_str());
   Serial.println("[HTTP] Endpoints:");
-  Serial.println("  GET  /api/v1/healthcheck");
-  Serial.println("  POST /api/v1/move");
-  Serial.println("  GET  /api/v1/move?direction=...&speed=...&duration=...");
-  Serial.println("  GET  /api/v1/status");
+  Serial.println("  GET  /                         - Web Interface");
+  Serial.println("  GET  /api/v1/healthcheck       - System Status");
+  Serial.println("  POST /api/v1/move              - Motor Control");
+  Serial.println("  GET  /api/v1/status            - Sensor Telemetry");
   Serial.println("========================================");
   Serial.println("[READY] System initialized successfully!");
-  Serial.println("[READY] You can now control the car via HTTP");
+  Serial.println("[READY] Open http://" + WiFi.localIP().toString() + " in your browser");
   Serial.println("========================================\n");
+  
+  // Lectura inicial del sensor
+  lastDistanceCm = readUltrasonicCm();
+  Serial.printf("[SENSOR] Initial reading: %.2f cm\n", lastDistanceCm);
 }
 
 void loop() {
-  // Handle HTTP requests
   server.handleClient();
 
   // Auto-stop motors after duration
@@ -474,6 +632,18 @@ void loop() {
     stopMotors();
   }
 
-  // Small delay to prevent watchdog issues
+  // Telemetría periódica del sensor (cada 500ms)
+  if (millis() - lastSensorRead >= SENSOR_READ_INTERVAL) {
+    lastDistanceCm = readUltrasonicCm();
+    lastSensorRead = millis();
+    
+    // Log solo si hay lectura válida (evitar spam de -1)
+    if (lastDistanceCm > 0) {
+      Serial.printf("[TELEMETRY] Distance: %.2f cm | Obstacle: %s\n", 
+                    lastDistanceCm, 
+                    (lastDistanceCm < OBSTACLE_THRESHOLD_CM) ? "DETECTED" : "Clear");
+    }
+  }
+
   delay(10);
 }
