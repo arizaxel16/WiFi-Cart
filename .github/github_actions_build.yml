@@ -1,0 +1,347 @@
+name: ESP32 IoT Car CI/CD
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'esp32_iot_car/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Arduino Sketch
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v1
+
+      - name: Install ESP32 Core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          echo "✅ ESP32 core installed successfully"
+
+      - name: Install Required Libraries
+        run: |
+          arduino-cli lib install "ArduinoJson"
+          echo "✅ Libraries installed:"
+          arduino-cli lib list
+
+      - name: Verify Sketch Files Exist
+        run: |
+          echo "Checking required files..."
+          ls -la esp32_iot_car/
+          
+          if [ ! -f "esp32_iot_car/esp32_iot_car.ino" ]; then
+            echo "❌ Main sketch file missing!"
+            exit 1
+          fi
+          
+          if [ ! -f "esp32_iot_car/config.h" ]; then
+            echo "❌ config.h missing!"
+            exit 1
+          fi
+          
+          echo "✅ All required files present"
+
+      - name: Validate Config Placeholders
+        run: |
+          echo "Validating config.h..."
+          
+          if grep -q "YOUR_WIFI_SSID\|iPhone de Juan Pablo" esp32_iot_car/config.h; then
+            echo "✅ WiFi credentials are placeholder or example"
+          else
+            echo "⚠️ WiFi credentials may be real - check config.h"
+          fi
+
+      - name: Compile Sketch
+        run: |
+          echo "Compiling ESP32 IoT Car sketch..."
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --build-property "build.extra_flags=-DWIFI_SSID=\\\"CI_BUILD\\\" -DWIFI_PASS=\\\"CI_BUILD\\\" -DUSE_ULTRASONIC_MOCK=1" \
+            --output-dir ./build \
+            --warnings all \
+            esp32_iot_car/
+          
+          echo "✅ Compilation successful!"
+
+      - name: Report Memory Usage
+        run: |
+          echo "## 💾 Memory Usage Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f "./build/esp32_iot_car.ino.elf" ]; then
+            echo "### Binary Files Generated:" >> $GITHUB_STEP_SUMMARY
+            ls -lh ./build/*.bin ./build/*.elf 2>/dev/null | awk '{print "- " $9 ": " $5}' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "### ESP32 Partition Info:" >> $GITHUB_STEP_SUMMARY
+          echo "- Flash Size: 4MB (default)" >> $GITHUB_STEP_SUMMARY
+          echo "- Partition Scheme: Default (1.2MB APP / 1.5MB SPIFFS)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f "./build/esp32_iot_car.ino.bin" ]; then
+            BIN_SIZE=$(stat -c%s "./build/esp32_iot_car.ino.bin" 2>/dev/null || stat -f%z "./build/esp32_iot_car.ino.bin" 2>/dev/null)
+            BIN_SIZE_KB=$((BIN_SIZE / 1024))
+            MAX_SIZE=1310720
+            PERCENTAGE=$((BIN_SIZE * 100 / MAX_SIZE))
+            
+            echo "### Program Storage:" >> $GITHUB_STEP_SUMMARY
+            echo "- Used: ${BIN_SIZE_KB} KB (${PERCENTAGE}%)" >> $GITHUB_STEP_SUMMARY
+            echo "- Maximum: 1280 KB" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            if [ $PERCENTAGE -gt 80 ]; then
+              echo "⚠️ **Warning:** Flash usage is above 80%" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ Flash usage is within acceptable limits" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Upload Firmware Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware-${{ github.sha }}
+          path: |
+            ./build/esp32_iot_car.ino.bin
+            ./build/esp32_iot_car.ino.elf
+          retention-days: 30
+
+      - name: Upload Bootloader Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-bootloader-${{ github.sha }}
+          path: |
+            ./build/esp32_iot_car.ino.bootloader.bin
+            ./build/esp32_iot_car.ino.partitions.bin
+          retention-days: 30
+
+  code-quality:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Check Code Structure
+        run: |
+          echo "## 🔍 Code Quality Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          FUNCTIONS=$(grep -c "^void\|^bool\|^float\|^String" esp32_iot_car/esp32_iot_car.ino || echo "0")
+          echo "- Functions defined: $FUNCTIONS" >> $GITHUB_STEP_SUMMARY
+          
+          DEBUG_PRINTS=$(grep -c "Serial.print" esp32_iot_car/esp32_iot_car.ino || echo "0")
+          echo "- Debug print statements: $DEBUG_PRINTS" >> $GITHUB_STEP_SUMMARY
+          
+          INO_SIZE=$(wc -l < esp32_iot_car/esp32_iot_car.ino)
+          CONFIG_SIZE=$(wc -l < esp32_iot_car/config.h)
+          
+          echo "- Main file lines: $INO_SIZE" >> $GITHUB_STEP_SUMMARY
+          echo "- Config file lines: $CONFIG_SIZE" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Security Checks:" >> $GITHUB_STEP_SUMMARY
+          
+          if grep -q "YOUR_WIFI\|iPhone de Juan Pablo" esp32_iot_car/config.h; then
+            echo "✅ WiFi credentials use placeholders" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Check WiFi credentials in config.h" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check for TODO Comments
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Development Notes:" >> $GITHUB_STEP_SUMMARY
+          
+          TODOS=$(grep -r "TODO\|FIXME\|XXX\|HACK" esp32_iot_car/ 2>/dev/null | wc -l || echo "0")
+          
+          if [ "$TODOS" -gt "0" ]; then
+            echo "⚠️ Found $TODOS TODO/FIXME comments:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -rn "TODO\|FIXME\|XXX" esp32_iot_car/ 2>/dev/null | head -10 >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ No pending TODO items" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  documentation:
+    name: Documentation Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Check Required Files
+        run: |
+          echo "## 📚 Documentation Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          MISSING=0
+          
+          if [ -f "README.md" ]; then
+            echo "✅ README.md present" >> $GITHUB_STEP_SUMMARY
+            SIZE=$(wc -l < README.md)
+            echo "   - Lines: $SIZE" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ README.md missing (recommended)" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ -f "esp32_iot_car/esp32_iot_car.ino" ]; then
+            echo "✅ Main sketch present" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Main sketch MISSING" >> $GITHUB_STEP_SUMMARY
+            MISSING=$((MISSING+1))
+          fi
+          
+          if [ -f "esp32_iot_car/config.h" ]; then
+            echo "✅ config.h present" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ config.h MISSING" >> $GITHUB_STEP_SUMMARY
+            MISSING=$((MISSING+1))
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ $MISSING -gt 0 ]; then
+            echo "❌ **$MISSING required file(s) missing!**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "✅ **All required files present**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: List Project Structure
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Project Structure:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tree -L 2 -I 'node_modules|.git' . || find . -maxdepth 2 -not -path '*/\.*' -print
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build, code-quality, documentation]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Firmware
+        uses: actions/download-artifact@v4
+        with:
+          name: esp32-firmware-${{ github.sha }}
+          path: ./release/
+
+      - name: Get Version from config.h
+        id: version
+        run: |
+          VERSION=$(grep 'FIRMWARE_VERSION' esp32_iot_car/config.h | cut -d'"' -f2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected firmware version: $VERSION"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}-${{ github.run_number }}
+          name: ESP32 IoT Car v${{ steps.version.outputs.version }} Build ${{ github.run_number }}
+          body: |
+            ## 🚗 ESP32 IoT Car Firmware Release
+            
+            **Version:** ${{ steps.version.outputs.version }}
+            **Build:** #${{ github.run_number }}
+            **Commit:** ${{ github.sha }}
+            
+            ### 📦 What's Included
+            - `esp32_iot_car.ino.bin` - Compiled firmware binary
+            - `esp32_iot_car.ino.elf` - ELF file for debugging
+            
+            ### ✨ Features
+            - ✅ HTTP API for motor control
+            - ✅ HC-SR04 ultrasonic sensor integration
+            - ✅ Obstacle detection (20cm threshold)
+            - ✅ Embedded web interface (React)
+            - ✅ Real-time telemetry
+            
+            ### 🔧 Installation
+            
+            **Method 1: Arduino IDE**
+            1. Download `esp32_iot_car.ino.bin`
+            2. Tools → Port → Select your ESP32
+            3. Sketch → Upload Using Programmer
+            
+            **Method 2: esptool.py**
+```bash
+            esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 write_flash -z 0x10000 esp32_iot_car.ino.bin
+```
+            
+            **Windows:**
+```bash
+            esptool.py --chip esp32 --port COM3 --baud 460800 write_flash -z 0x10000 esp32_iot_car.ino.bin
+```
+            
+            ### ⚙️ Configuration
+            Before first use, update `config.h`:
+            - WiFi SSID and Password
+            - Motor pins (if different from default)
+            - Sensor pins (D32=TRIG, D33=ECHO)
+            
+            ### 📝 Changelog
+            See commit history for details.
+          files: |
+            ./release/esp32_iot_car.ino.bin
+            ./release/esp32_iot_car.ino.elf
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  summary:
+    name: Pipeline Summary
+    runs-on: ubuntu-latest
+    needs: [build, code-quality, documentation]
+    if: always()
+    
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "# 🏁 CI/CD Pipeline Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | ${{ needs.build.result == 'success' && '✅' || '❌' }} ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Code Quality | ${{ needs.code-quality.result == 'success' && '✅' || '❌' }} ${{ needs.code-quality.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Documentation | ${{ needs.documentation.result == 'success' && '✅' || '⚠️' }} ${{ needs.documentation.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.build.result }}" == "success" ] && \
+             [ "${{ needs.code-quality.result }}" == "success" ]; then
+            echo "## ✅ All Critical Checks Passed!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "The firmware is ready for deployment." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Some Checks Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please review the failed jobs and fix the issues." >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Build #:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY

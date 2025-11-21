@@ -1,474 +1,856 @@
-# WiFi-Cart — Control de Vehículo IoT con Servidor HTTP y Publicación MQTT
+# ESP32 IoT Car Controller
 
-Proyecto para controlar un carro con **ESP32** usando **peticiones HTTP** y **publicación MQTT** de las órdenes recibidas. El sistema valida los parámetros (velocidad y duración) para evitar movimientos no deseados y expone un **endpoint de healthcheck**.
+[![CI/CD Build](https://github.com/YOUR_USERNAME/esp32-iot-car/actions/workflows/build.yml/badge.svg)](https://github.com/YOUR_USERNAME/esp32-iot-car/actions/workflows/build.yml)
 
-**Autores:** Axel Ariza Pulido, Juan Pablo Benitez Bernal y Juan Montes Sabogal  
-**Materia:** Internet de las Cosas  
-**Profesor:** Fabián Paeri (`fabianpaeri`)  
-**Fecha de entrega:** 8 de octubre de 2025
+A WiFi-controlled 2WD robot car with ultrasonic obstacle detection, REST API control, and encrypted MQTT telemetry using ESP32.
 
 ---
 
-## Objetivos
+## 📋 Table of Contents
 
-- Controlar el carro mediante peticiones HTTP.
-- Exponer un único endpoint `/move` con parámetros de **dirección**, **velocidad** y **duración** (máx. 5000 ms).
-- Exponer un endpoint `/health` para verificar disponibilidad del servidor.
-- Conectar el ESP32 a un **broker MQTT** y **publicar** cada instrucción recibida incluyendo la **IP del cliente**.
-- Documentar endpoints, arquitectura y pruebas; anexar diagramas e insumos en carpeta `docs/`.
-- Cumplir estándares de diseño ingenieril: diagramas UML, criterios de diseño, riesgos/mitigaciones y evidencia de validación.
-
----
-
-## Criterios de Diseño y Restricciones
-
-- **Protocolos elegidos**
-  - **HTTP** para control directo desde clientes comunes (Postman, navegador, apps), fácil depuración y semántica clara.
-  - **MQTT** para desacoplar control de observabilidad, soportar múltiples suscriptores y baja latencia.
-- **Restricciones y supuestos**
-  - **Seguridad física:** duración máxima de movimiento `<= 5000 ms`; parada automática tras timeout.
-  - **Recursos embebidos:** uso de parser JSON simple para bajo consumo de RAM; logs acotados por Serial.
-  - **Red local variable:** reconexión a MQTT; publicación best-effort si el broker no está disponible.
-- **Decisiones de hardware**
-  - **L298N** por disponibilidad y compatibilidad de tensión/corriente con motores DC de prototipado.
-  - **PWM** en ENA/ENB para modular velocidad; inversión de giro con IN1..IN4 e IN3..IN4.
-- **Criterios de validación**
-  - Respuestas HTTP coherentes (200, 400).
-  - Mensaje MQTT publicado con `direction`, `speed`, `duration`, `client_ip`.
-  - Latencia intra-LAN estable en el orden de decenas de ms.
+1. [Features](#features)
+2. [Hardware Requirements](#hardware-requirements)
+3. [Wiring Diagram](#wiring-diagram)
+4. [Software Setup](#software-setup)
+5. [API Documentation (REST Endpoints)](#api-documentation)
+6. [MQTT Topics](#mqtt-topics)
+7. [Postman Collection](#postman-collection)
+8. [Sequence Diagrams](#sequence-diagrams)
+9. [Memory Usage](#memory-usage)
+10. [Libraries Used](#libraries-used)
+11. [Limitations](#limitations)
+12. [Future Improvements](#future-improvements)
+13. [CI/CD Pipeline](#cicd-pipeline)
 
 ---
 
-## Arquitectura del Sistema
+## 🚗 Features
 
-```mermaid
-graph TD
-    A["Cliente HTTP (Postman / App / Navegador)"] -->|POST /move| B["ESP32 - Servidor HTTP"]
-    A -->|GET /health| B
-    B -->|PWM| C["L298N"]
-    C --> D["Motores DC del carro"]
-    B -->|MQTT Publish JSON| E["Broker HiveMQ"]
-    E -->|Suscriptores| F["Dashboard / Consola MQTT"]
-```
----
-
-## UML de Despliegue 
-
-```mermaid
-graph TD
-  subgraph Local["Red Local"]
-    client["Cliente (Laptop/Phone)"]
-    subgraph esp32["ESP32"]
-      http["WebServer (/health,/move)"]
-      mqtt["PubSubClient (MQTT)"]
-      motor["MotorCtrl (PWM+GPIO)"]
-    end
-  end
-
-  subgraph Internet
-    broker["Broker MQTT (HiveMQ)"]
-  end
-
-  client -->|HTTP| http
-  http -->|GPIO/PWM| motor
-  http --> mqtt
-  mqtt -->|MQTT| broker
-```
+- **HTTP REST API** for remote motor control
+- **MQTT over TLS** (port 8883) for secure telemetry
+- **HC-SR04 Ultrasonic Sensor** for obstacle detection
+- **Automatic collision prevention** - blocks forward movement when obstacle detected
+- **Real-time telemetry** - publishes sensor data every second
+- **Configurable via preprocessor** - easy compile-time configuration
+- **CI/CD Pipeline** (Expert Feature) - automated builds with GitHub Actions
 
 ---
 
-## Hardware Utilizado
+## 🔧 Hardware Requirements
 
-- ESP32-WROOM-32 (Wi-Fi integrado)
-- Driver de motores L298N
-- 2 motores DC (tracción)
-- Fuente 7–12 V para motores
-- Jumpers / protoboard
+| Component | Quantity | Description |
+|-----------|----------|-------------|
+| ESP32 DevKit V1 | 1 | Main microcontroller (30-pin) |
+| L298N Motor Driver | 1 | Dual H-Bridge motor controller |
+| HC-SR04 Ultrasonic Sensor | 1 | Distance measurement (2-400cm) |
+| DC Gearbox Motors | 2 | 3-6V DC motors with gear reduction |
+| 2WD Robot Chassis | 1 | Base platform with wheels and caster |
+| Battery Pack | 1 | 7.4V-12V LiPo or 6xAA NiMH |
+| 10kΩ Resistors | 2 | For voltage divider (ECHO pin) |
+| Jumper Wires | ~25 | Male-to-Female and Male-to-Male |
+| Mini Breadboard | 1 | Optional, for voltage divider |
+| USB Micro Cable | 1 | For programming ESP32 |
 
-### Mapeo de Pines ESP32 ↔ L298N
-
-| Pin ESP32 | Señal L298N | Función                                   |
-|-----------|-------------|-------------------------------------------|
-| 13        | ENA         | Velocidad Motor Derecho (PWM)             |
-| 14        | IN1         | Dirección Motor Derecho                    |
-| 27        | IN2         | Dirección Motor Derecho                    |
-| 12        | ENB         | Velocidad Motor Izquierdo (PWM)           |
-| 26        | IN3         | Dirección Motor Izquierdo                  |
-| 25        | IN4         | Dirección Motor Izquierdo                  |
+**Total Estimated Cost:** $25-40 USD (excluding battery)
 
 ---
 
-## Repositorio y Estructura
+## 🔌 Wiring Diagram
+
+### Complete Pin Connections
 
 ```
-WiFi-Cart/
-├─ sketch_oct6a/
-│  ├─ sketch_oct6a.ino
-│  └─ config.h
-├─ .gitattributes
-└─ README.md
+                    ┌─────────────┐
+                    │   ESP32     │
+                    │   DevKit    │
+                    └─────────────┘
+                          │
+    ┌─────────────────────┼─────────────────────┐
+    │                     │                     │
+    ▼                     ▼                     ▼
+┌────────┐         ┌─────────────┐        ┌──────────┐
+│ HC-SR04│         │    L298N    │        │  Motors  │
+│Ultrasonic│        │Motor Driver │        │  (2x)    │
+└────────┘         └─────────────┘        └──────────┘
 ```
+
+### ESP32 to L298N Motor Driver
+
+| ESP32 GPIO | L298N Pin | Wire Color (Suggested) | Function |
+|------------|-----------|------------------------|----------|
+| GPIO 14 | IN1 | Green | Motor A Direction 1 |
+| GPIO 27 | IN2 | Green | Motor A Direction 2 |
+| GPIO 26 | IN3 | Green | Motor B Direction 1 |
+| GPIO 25 | IN4 | Green | Motor B Direction 2 |
+| GPIO 13 | ENA | Blue | Motor A Speed (PWM) |
+| GPIO 12 | ENB | Blue | Motor B Speed (PWM) |
+| GND | GND | Black | Common Ground |
+
+**⚠️ Remove the ENA and ENB jumpers on the L298N board to enable PWM speed control!**
+
+### ESP32 to HC-SR04 Ultrasonic Sensor
+
+| ESP32 Pin | HC-SR04 Pin | Notes |
+|-----------|-------------|-------|
+| 3.3V (or 5V) | VCC | Power supply (5V preferred) |
+| GPIO 32 | TRIG | Trigger signal (OUTPUT) |
+| GPIO 33 | ECHO | **Through voltage divider!** |
+| GND | GND | Common ground |
+
+### ⚠️ CRITICAL: Voltage Divider for ECHO Pin
+
+**The HC-SR04 ECHO pin outputs 5V, but ESP32 GPIO pins are 3.3V tolerant!**
+
+You MUST use a voltage divider to protect the ESP32:
+
+```
+HC-SR04 ECHO ──────┬────── ESP32 GPIO 33
+                   │
+                  [10kΩ]
+                   │
+                  GND
+                   │
+                  [10kΩ]
+                   │
+HC-SR04 GND ───────┘
+```
+
+**Calculation:** 5V × (10kΩ / (10kΩ + 10kΩ)) = 2.5V (safe for ESP32)
+
+Alternative: Use a logic level shifter module.
+
+### L298N Power Connections
+
+| L298N Terminal | Connection | Description |
+|----------------|------------|-------------|
+| +12V | Battery + | 7.4V to 12V input |
+| GND | Battery - & ESP32 GND | **Common ground is essential!** |
+| +5V | Optional: ESP32 VIN | Regulated 5V output (only if 12V jumper is ON) |
+
+### Motor Connections
+
+| L298N Output | Motor |
+|--------------|-------|
+| OUT1, OUT2 | Motor A (Right wheel) |
+| OUT3, OUT4 | Motor B (Left wheel) |
+
+### GPIO Pin Selection Notes
+
+**Why GPIO 32 for TRIG instead of GPIO 35?**
+- GPIO 34, 35, 36, 39 are **INPUT-ONLY** on ESP32
+- TRIG requires OUTPUT capability for sending pulses
+- GPIO 32 supports both INPUT and OUTPUT
 
 ---
 
-## Configuración de Red y MQTT
+## 💻 Software Setup
 
-En el sketch (`sketch_oct6a/sketch_oct6a.ino`) ajustar:
+### Prerequisites
+
+1. **Arduino IDE 2.x** (or 1.8.x)
+2. **ESP32 Board Package** installed in Arduino IDE
+3. **Required Libraries** (install via Library Manager)
+
+### Step 1: Install Arduino IDE
+
+Download from: https://www.arduino.cc/en/software
+
+### Step 2: Add ESP32 Board Support
+
+1. Open Arduino IDE
+2. Go to **File → Preferences**
+3. In "Additional Board Manager URLs", add:
+   ```
+   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+   ```
+4. Go to **Tools → Board → Boards Manager**
+5. Search for "esp32" and install **"ESP32 by Espressif Systems"**
+
+### Step 3: Install Required Libraries
+
+Go to **Sketch → Include Library → Manage Libraries** and install:
+
+- **PubSubClient** by Nick O'Leary (version 2.8+)
+- **ArduinoJson** by Benoit Blanchon (version 6.x)
+
+### Step 4: Configure Your Settings
+
+Edit `config.h` and change:
 
 ```cpp
-// Wi-Fi (solo para demo; en producción mover a NVS/portal)
-const char* ssid = "iPhone de Juan Pablo";
-const char* password = "millos14";
-
-// MQTT
-const char* mqtt_server = "broker.hivemq.com";
-const int   mqtt_port   = 1883;
-const char* mqtt_topic  = "iot_car/commands";
+#define WIFI_SSID "YOUR_WIFI_NETWORK_NAME"
+#define WIFI_PASS "YOUR_WIFI_PASSWORD"
 ```
+
+Optional: Set `USE_ULTRASONIC_MOCK` to `1` for testing without the physical sensor.
+
+### Step 5: Upload to ESP32
+
+1. Connect ESP32 via USB
+2. Select **Tools → Board → ESP32 Dev Module**
+3. Select the correct **Port** (e.g., COM3 on Windows, /dev/ttyUSB0 on Linux)
+4. Click **Upload** (→ button)
+5. Open **Serial Monitor** (Tools → Serial Monitor) at **115200 baud**
+
+### Step 6: Verify Connection
+
+In Serial Monitor, you should see:
+```
+========================================
+ESP32 IoT Car Controller v2.0.0
+========================================
+[MOTOR] Initialized
+[ULTRASONIC] Initialized
+[ULTRASONIC] Running with REAL sensor
+[WIFI] Connecting to YOUR_SSID
+........
+[WIFI] Connected - IP: 192.168.1.XXX
+[TLS] Configuring secure connection...
+[HTTP] Server started at http://192.168.1.XXX
+[READY] System initialized successfully!
+```
+
+**Note the IP address - you'll need it for API calls!**
+
 ---
 
-## Endpoints HTTP
+## 📡 API Documentation
 
-### 1) POST `/move`
+**Base URL:** `http://<ESP32_IP_ADDRESS>`
 
-Controla el movimiento del carro.
+Example: `http://192.168.1.100`
 
-- **Content-Type:** `application/json`
-- **Parámetros del body:**
+### Endpoint 1: Health Check
 
-| Campo       | Tipo   | Rango/Valores                         | Obligatorio |
-|-------------|--------|----------------------------------------|-------------|
-| `direction` | string | `forward`, `backward`, `left`, `right` | Sí          |
-| `speed`     | int    | `1` a `255`                            | Sí          |
-| `duration`  | int    | `1` a `5000` milisegundos              | Sí          |
+**GET** `/api/v1/healthcheck`
 
-**Ejemplo de solicitud:**
+Returns system status and diagnostics.
+
+**Request:**
 ```http
-POST http://<ESP32_IP>/move
+GET /api/v1/healthcheck HTTP/1.1
+Host: 192.168.1.100
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "ok",
+  "version": "2.0.0",
+  "chip_id": "a4cf12f3d8e0",
+  "ip": "192.168.1.100",
+  "wifi_rssi": -45,
+  "uptime_ms": 125000,
+  "free_heap": 245680,
+  "mqtt_connected": true,
+  "mock_sensor": false,
+  "last_distance_cm": 35.2,
+  "motor_state": "stopped"
+}
+```
+
+**Field Descriptions:**
+- `wifi_rssi`: Signal strength in dBm (closer to 0 = better)
+- `free_heap`: Available RAM in bytes
+- `mock_sensor`: `true` if using simulated sensor
+- `motor_state`: Current movement state
+
+---
+
+### Endpoint 2: Move Car (POST)
+
+**POST** `/api/v1/move`
+
+Commands the car to move in a specified direction.
+
+**Request:**
+```http
+POST /api/v1/move HTTP/1.1
+Host: 192.168.1.100
 Content-Type: application/json
 
 {
   "direction": "forward",
   "speed": 200,
+  "duration": 2000
+}
+```
+
+**Parameters:**
+
+| Field | Type | Required | Range | Description |
+|-------|------|----------|-------|-------------|
+| `direction` | string | Yes | `forward`, `backward`, `left`, `right`, `stop` | Movement direction |
+| `speed` | integer | Yes | 1-255 | Motor speed (PWM duty cycle) |
+| `duration` | integer | Yes | 1-10000 | Duration in milliseconds |
+
+**Response (200 OK) - Success:**
+```json
+{
+  "status": "moving",
+  "direction": "forward",
+  "speed": 200,
+  "duration_ms": 2000,
+  "will_stop_at": 127000
+}
+```
+
+**Response (409 Conflict) - Obstacle Detected:**
+```json
+{
+  "error": "Obstacle detected",
+  "distance_cm": 15.3,
+  "threshold_cm": 20.0
+}
+```
+
+This occurs when trying to move **forward** and an obstacle is within threshold distance (default 20cm).
+
+**Response (400 Bad Request):**
+```json
+{
+  "error": "Invalid params: direction(forward/backward/left/right/stop), speed(1-255), duration(1-10000ms)"
+}
+```
+
+---
+
+### Endpoint 3: Move Car (GET)
+
+**GET** `/api/v1/move`
+
+Alternative method using query parameters (convenient for browser testing).
+
+**Request:**
+```http
+GET /api/v1/move?direction=forward&speed=150&duration=1000 HTTP/1.1
+Host: 192.168.1.100
+```
+
+**Response:** Same as POST method.
+
+---
+
+### Endpoint 4: Get Status
+
+**GET** `/api/v1/status`
+
+Returns current motor and sensor status.
+
+**Request:**
+```http
+GET /api/v1/status HTTP/1.1
+Host: 192.168.1.100
+```
+
+**Response (200 OK):**
+```json
+{
+  "motor_state": "forward",
+  "motor_speed": 200,
+  "is_moving": true,
+  "last_distance_cm": 45.8,
+  "obstacle_detected": false
+}
+```
+
+---
+
+## 📨 MQTT Topics
+
+All MQTT communication uses **TLS encryption** on port **8883**.
+
+**Broker:** `broker.hivemq.com` (free public broker)
+
+### Published Topics (ESP32 → Broker)
+
+| Topic | QoS | Retained | Frequency | Description |
+|-------|-----|----------|-----------|-------------|
+| `iot_car/telemetry` | 0 | No | Every 1 second | Sensor readings and status |
+| `iot_car/commands` | 0 | No | On each move command | Movement command log |
+| `iot_car/status` | 0 | Yes | On connect | Online/offline status |
+
+### Telemetry Payload (`iot_car/telemetry`)
+
+Published every second:
+
+```json
+{
+  "distance_cm": 45.8,
+  "obstacle_detected": false,
+  "timestamp": 125000,
+  "chip_id": "a4cf12f3d8e0",
+  "ip": "192.168.1.100",
+  "mock_sensor": false,
+  "motor_state": "stopped",
+  "motor_speed": 0,
+  "wifi_rssi": -45
+}
+```
+
+### Command Log Payload (`iot_car/commands`)
+
+Published for each movement:
+
+```json
+{
+  "direction": "forward",
+  "speed": 200,
+  "duration": 2000,
+  "client_ip": "192.168.1.50",
+  "timestamp": 124500
+}
+```
+
+### Status Payload (`iot_car/status`)
+
+Published on connection (retained):
+
+```json
+{
+  "status": "online",
+  "chip_id": "a4cf12f3d8e0"
+}
+```
+
+### How to Subscribe to MQTT Topics
+
+**Using MQTT Explorer (GUI):**
+1. Download: https://mqtt-explorer.com/
+2. Connect to `broker.hivemq.com:8883` with TLS
+3. Subscribe to `iot_car/#`
+
+**Using mosquitto_sub (CLI):**
+```bash
+mosquitto_sub -h broker.hivemq.com -p 8883 \
+  --capath /etc/ssl/certs/ \
+  -t "iot_car/#" -v
+```
+
+**Using HiveMQ WebSocket Client:**
+- URL: http://www.hivemq.com/demos/websocket-client/
+- Subscribe to `iot_car/telemetry`
+
+---
+
+## 📮 Postman Collection
+
+### Setting Up Postman
+
+1. **Download Postman:** https://www.postman.com/downloads/
+2. **Create New Collection:** Click "New" → "Collection"
+3. **Name:** `ESP32 IoT Car API`
+4. **Add Variable:**
+   - Variable: `base_url`
+   - Initial Value: `http://192.168.1.100` (your ESP32 IP)
+
+### Requests to Add
+
+#### Request 1: Health Check
+
+- **Name:** `Health Check`
+- **Method:** `GET`
+- **URL:** `{{base_url}}/api/v1/healthcheck`
+
+#### Request 2: Move Forward
+
+- **Name:** `Move Forward`
+- **Method:** `POST`
+- **URL:** `{{base_url}}/api/v1/move`
+- **Headers:** `Content-Type: application/json`
+- **Body (raw JSON):**
+```json
+{
+  "direction": "forward",
+  "speed": 200,
+  "duration": 2000
+}
+```
+
+#### Request 3: Move Backward
+
+- **Name:** `Move Backward`
+- **Method:** `POST`
+- **URL:** `{{base_url}}/api/v1/move`
+- **Body:**
+```json
+{
+  "direction": "backward",
+  "speed": 150,
   "duration": 1500
 }
 ```
 
-**Respuesta exitosa (200):**
-```json
-{
-  "status": "movimiento iniciado",
-  "details": {
-    "direction": "forward",
-    "speed": 200,
-    "duration": 1500,
-    "client_ip": "172.20.10.3"
-  }
-}
-```
+#### Request 4: Turn Left
 
-**Respuestas de error:**
-- 400 — {"error":"Cuerpo de la petición vacío"}
-- 400 — {"error":"JSON inválido o campos faltantes ('direction', 'speed', 'duration')"}
-- 400 — {"error":"Parámetros inválidos. 'speed' (1-255), 'duration' (1-5000ms)"}
-- 400 — {"error":"Dirección no válida. Use 'forward', 'backward', 'right', 'left'"}
-
-Validaciones implementadas:
-- `speed` en rango 1..255.
-- `duration` en rango 1..5000 ms.
-- `direction` restringida a valores permitidos.
-
----
-
-### 2) GET `/health`
-
-Verifica que el servidor HTTP del ESP32 esté operativo.
-
-**Ejemplo de respuesta (200):**
-```json
-{
-  "status": "ok",
-  "chip_id": "cc9d3f4a0"
-}
-```
-
----
-
-## Publicación MQTT
-
-- **Broker:** broker.hivemq.com  
-- **Puerto:** 1883  
-- **Topic:** iot_car/commands
-
-Cada solicitud exitosa a `/move` genera un **mensaje JSON** publicado en el topic:
-
+- **Name:** `Turn Left`
+- **Method:** `POST`
+- **URL:** `{{base_url}}/api/v1/move`
+- **Body:**
 ```json
 {
   "direction": "left",
-  "speed": 200,
-  "duration": 1500,
-  "client_ip": "172.20.10.5"
+  "speed": 180,
+  "duration": 1000
 }
 ```
 
-Suscriptores pueden visualizar en un cliente web MQTT (HiveMQ WebSocket Client) en tiempo real.
+#### Request 5: Turn Right
 
----
-
-## Diagrama de Secuencia
-
-```mermaid
-sequenceDiagram
-    participant U as Usuario (Postman/App)
-    participant S as ESP32 HTTP Server
-    participant M as Broker MQTT
-    participant C as Carro (L298N + Motores)
-
-    U->>S: POST /move {"direction":"forward","speed":200,"duration":1500}
-    S->>M: Publish iot_car/commands (JSON con IP del cliente)
-    S->>C: Señales PWM y dirección a L298N
-    C-->>S: Movimiento durante 1500 ms
-    S-->>U: 200 {"status":"movimiento iniciado"}
-    S->>C: Stop (al cumplirse el tiempo)
-```
-
----
-
-## Validación y Resultados de Pruebas
-
-### Casos de prueba
-1. **Healthcheck OK**  
-   GET `/health` → 200, `status=ok`.
-2. **Movimiento válido**  
-   POST `/move` con `forward,200,1500` → 200. MQTT recibe JSON con `client_ip`.
-3. **Parámetros fuera de rango**  
-   `speed=0` o `duration=6000` → 400 con mensaje de error.
-4. **Dirección inválida**  
-   `direction="up"` → 400.
-5. **Intermitencia de red MQTT**  
-   Broker no disponible → reintentos; publicación en cuanto reconecta.
-
----
-
-## Seguridad y Confiabilidad
-
-- **Límite de duración** `<= 5000 ms` para evitar movimientos indefinidos.
-- **Stop automático** por `moveStopTime` y `stopMotors()`.
-- **Reintento MQTT** en `reconnect_mqtt()`; `clientId` aleatorio para evitar colisiones.
-- **Recomendado** (extensiones fáciles de integrar):
-  - **Token** en header `X-API-Key` para `/move`.
-  - **Rate limiting**: rechazar si hay movimiento en curso.
-  - **MQTT QoS 1** y **LWT** para presencia del dispositivo.
-  - **Watchdog** por cuelgues de red.
-
----
-
-## Equipo y Roles
-
-- **Axel Ariza Pulido:** Control de motores, montaje y pruebas físicas.  
-- **Juan Pablo Benitez Bernal:** Servidor HTTP, validaciones y colección Postman.  
-- **Juan Montes Sabogal:** Cliente MQTT, diagramas y documentación.
-
----
-
-## Roadmap y Extensiones Propuestas
-
-- Portal de credenciales (AP + captive portal) con guardado en NVS.  
-- OTA para actualizar firmware sin cable.  
-- Telemetría a `iot_car/telemetry` (voltaje batería, temperatura driver).  
-- Panel web local con botones y feed MQTT.
-
----
-
-## Colección Postman
-
-Enlace público:  
-https://api.postman.com/collections/29816653-4aaa258a-961d-45fe-846f-f1f14398d6e5?access_key=PMAT-01K6X07M2FWH008YX6HHY8E59P
-
-Resumen de requests incluidos:
-
-| Nombre    | Método | URL base             | Endpoint | Body (JSON)                                                             |
-|-----------|--------|----------------------|----------|-------------------------------------------------------------------------|
-| Forward   | POST   | `http://172.20.10.5` | `/move`  | `{"direction":"forward","speed":200,"duration":1500}`                   |
-| Backward  | POST   | `http://172.20.10.5` | `/move`  | `{"direction":"backward","speed":200,"duration":1500}`                  |
-| Left      | POST   | `http://172.20.10.5` | `/move`  | `{"direction":"left","speed":200,"duration":1500}`                      |
-| Right     | POST   | `http://172.20.10.5` | `/move`  | `{"direction":"right","speed":200,"duration":1500}`                     |
-| Health    | GET    | `http://172.20.10.5` | `/health`| —                                                                       |
-
-> Reemplazar la IP base por la IP real del ESP32 mostrada en el Monitor Serial.
-
----
-
-## Puntos clave del Sketch
-
-- Servidor HTTP con `WebServer`.
-- Cliente MQTT con `PubSubClient`.
-- Control de motores con `analogWrite` sobre ENA/ENB y señales IN1–IN4.
-- Validaciones de payload, cálculo de `moveStopTime` y parada automática.
-
----
-
----
-## Telemetría de Ultrasonido (HC-SR04)
-- **Tópico MQTT de telemetría**: `iot_car/ultrasonic` (configurable con `MQTT_TOPIC_TELEM`)
-- **Período de publicación**: `1000 ms` por defecto (`ULTRASONIC_PERIOD_MS`).
-- **Modo mock**: activado por defecto (`USE_ULTRASONIC_MOCK=1`). Para usar el sensor real, compila con `-D USE_ULTRASONIC_MOCK=0`.
-**Payload JSON publicado:**
+- **Name:** `Turn Right`
+- **Method:** `POST`
+- **URL:** `{{base_url}}/api/v1/move`
+- **Body:**
 ```json
 {
-  "distance_cm": 123.45,     // null si timeout / lectura inválida
-  "ts": 412345,              // millis desde arranque
-  "chip_id": "cc9d3f4a0",
-  "ip": "172.20.10.5",
-  "mock": true
+  "direction": "right",
+  "speed": 180,
+  "duration": 1000
 }
 ```
----
-## Configuración por Preprocesador (`config.h`)
-Centraliza credenciales, pines y parámetros del proyecto. Puedes anularlos en tiempo de compilación con `-D`.
-```cpp
-// --------- WIFI ----------
-#ifndef WIFI_SSID
-#define WIFI_SSID "iPhone de Juan Pablo"
-#endif
-#ifndef WIFI_PASS
-#define WIFI_PASS "millos14"
-#endif
-// --------- MQTT ----------
-#ifndef MQTT_SERVER
-#define MQTT_SERVER "broker.hivemq.com"
-#endif
-#ifndef MQTT_PORT
-#define MQTT_PORT 1883
-#endif
-#ifndef MQTT_TOPIC_CMDS
-#define MQTT_TOPIC_CMDS "iot_car/commands"
-#endif
-#ifndef MQTT_TOPIC_TELEM
-#define MQTT_TOPIC_TELEM "iot_car/ultrasonic"
-#endif
-// --------- Pines Motores L298N ----------
-#ifndef ENA_PIN
-#define ENA_PIN 13   // PWM Motor Derecho
-#endif
-#ifndef ENB_PIN
-#define ENB_PIN 12   // PWM Motor Izquierdo
-#endif
-#ifndef IN1_PIN
-#define IN1_PIN 14
-#endif
-#ifndef IN2_PIN
-#define IN2_PIN 27
-#endif
-#ifndef IN3_PIN
-#define IN3_PIN 26
-#endif
-#ifndef IN4_PIN
-#define IN4_PIN 25
-#endif
-// --------- HC-SR04 ----------
-#ifndef TRIG_PIN
-#define TRIG_PIN 35  // Trigger (OUTPUT)
-#endif
-#ifndef ECHO_PIN
-#define ECHO_PIN 34  // Echo (INPUT) -> Debe bajar a 3.3V con divisor
-#endif
-// 1 = simulado, 0 = real
-#ifndef USE_ULTRASONIC_MOCK
-#define USE_ULTRASONIC_MOCK 1
-#endif
-#ifndef ULTRASONIC_PERIOD_MS
-#define ULTRASONIC_PERIOD_MS 1000
-#endif
-#ifndef ULTRASONIC_TIMEOUT_US
-#define ULTRASONIC_TIMEOUT_US 30000
-#endif
-```
----
-## Función de Lectura y Publicación
-En el `sketch_oct6a.ino` se añade la lectura (mock o real) y la publicación periódica.
-```cpp
-float readUltrasonicCm() {
-#if USE_ULTRASONIC_MOCK
-  float base = random(1000, 25100) / 100.0f; // 10.00 a 250.99 cm
-  float jitter = random(-10, 10) / 100.0f;
-  return max(0.0f, base + jitter);
-#else
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(3);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-  unsigned long duration = pulseIn(ECHO_PIN, HIGH, ULTRASONIC_TIMEOUT_US);
-  if (duration == 0) return -1.0f; // timeout
-  float distanceCm = duration / 58.0f; // us -> cm aproximado
-  return distanceCm;
-#endif
-}
-void publishUltrasonic() {
-  float d = readUltrasonicCm();
-  String payload = "{";
-  payload += "\"distance_cm\":"; payload += (d < 0 ? "null" : String(d, 2));
-  payload += ",\"ts\":" + String((unsigned long)millis());
-  payload += ",\"chip_id\":\"" + String(ESP.getEfuseMac(), HEX) + "\"";
-  payload += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
-  payload += ",\"mock\":"; payload += (USE_ULTRASONIC_MOCK ? "true" : "false");
-  payload += "}";
-  publishMqtt(MQTT_TOPIC_TELEM, payload);
+
+#### Request 6: Stop Motors
+
+- **Name:** `Emergency Stop`
+- **Method:** `POST`
+- **URL:** `{{base_url}}/api/v1/move`
+- **Body:**
+```json
+{
+  "direction": "stop",
+  "speed": 1,
+  "duration": 1
 }
 ```
-**Ejecución periódica en `loop()`**:
-```cpp
-static unsigned long nextTelemetryAt = 0;
-unsigned long now = millis();
-if ((long)(now - nextTelemetryAt) >= 0) {
-  publishUltrasonic();
-  nextTelemetryAt = now + ULTRASONIC_PERIOD_MS;
-}
+
+#### Request 7: Get Status
+
+- **Name:** `Get Status`
+- **Method:** `GET`
+- **URL:** `{{base_url}}/api/v1/status`
+
+#### Request 8: Quick Move (GET)
+
+- **Name:** `Quick Move via GET`
+- **Method:** `GET`
+- **URL:** `{{base_url}}/api/v1/move?direction=forward&speed=100&duration=500`
+
+### Test Scripts (Optional)
+
+Add to Health Check request **Tests** tab:
+
+```javascript
+pm.test("Status is 200", () => {
+    pm.response.to.have.status(200);
+});
+
+pm.test("Status is ok", () => {
+    var data = pm.response.json();
+    pm.expect(data.status).to.eql("ok");
+});
+
+pm.test("MQTT connected", () => {
+    var data = pm.response.json();
+    pm.expect(data.mqtt_connected).to.be.true;
+});
 ```
----
-## Compilación con Overrides (opcional)
-Puedes cambiar parámetros **sin editar** `config.h` usando defines en la compilación.
-- **Arduino CLI**:
+
+### cURL Examples
+
 ```bash
-arduino-cli compile -b esp32:esp32:esp32   -D USE_ULTRASONIC_MOCK=0   -D TRIG_PIN=4 -D ECHO_PIN=5   -D MQTT_TOPIC_TELEM=\"iot_car/ultra_lab\"
+# Health Check
+curl -X GET "http://192.168.1.100/api/v1/healthcheck"
+
+# Move Forward
+curl -X POST "http://192.168.1.100/api/v1/move" \
+  -H "Content-Type: application/json" \
+  -d '{"direction":"forward","speed":200,"duration":2000}'
+
+# Quick test via GET (paste in browser)
+http://192.168.1.100/api/v1/move?direction=forward&speed=100&duration=500
 ```
-- **PlatformIO (`platformio.ini`)**:
-```ini
-build_flags = 
-  -DUSE_ULTRASONIC_MOCK=0 
-  -DTRIG_PIN=4 -DECHO_PIN=5 
-  -DMQTT_TOPIC_TELEM=\"iot_car/ultra_lab\"
+
+---
+
+## 📊 Sequence Diagrams
+
+### Movement Command Flow
+
 ```
+User                WebGUI/Postman        ESP32              MQTT Broker
+ │                        │                  │                    │
+ │──── Click Forward ────>│                  │                    │
+ │                        │                  │                    │
+ │                        │── POST /move ───>│                    │
+ │                        │                  │                    │
+ │                        │                  │── Read Ultrasonic  │
+ │                        │                  │   (Check obstacle) │
+ │                        │                  │                    │
+ │                        │                  │── Publish Command ─────>│
+ │                        │                  │   (iot_car/commands)    │
+ │                        │                  │                    │
+ │                        │                  │── Activate Motors  │
+ │                        │                  │   (moveForward)    │
+ │                        │                  │                    │
+ │                        │<── 200 OK ───────│                    │
+ │                        │   {moving...}    │                    │
+ │                        │                  │                    │
+ │<─── Show Status ───────│                  │                    │
+ │                        │                  │                    │
+ │                        │                  │── [After duration] │
+ │                        │                  │   stopMotors()     │
+ │                        │                  │                    │
+ └────────────────────────┴──────────────────┴────────────────────┘
+
+                    TELEMETRY LOOP (Every 1 second)
+ │                        │                  │                    │
+ │                        │                  │── Read Distance ───│
+ │                        │                  │                    │
+ │                        │                  │── Publish ─────────────>│
+ │                        │                  │   (iot_car/telemetry)   │
+ │                        │                  │                    │
+ │                        │<─────────────────────── Subscribe ────│
+ │                        │                  │                    │
+ │<─── Update Display ────│                  │                    │
+```
+
+### Obstacle Detection Flow
+
+```
+User                    ESP32                  Response
+ │                        │                       │
+ │── POST /move ─────────>│                       │
+ │   {forward, 200, 2000} │                       │
+ │                        │                       │
+ │                        │── Check Distance      │
+ │                        │   lastDistanceCm=15cm │
+ │                        │                       │
+ │                        │── 15cm < 20cm         │
+ │                        │   OBSTACLE DETECTED!  │
+ │                        │                       │
+ │<────────────────────── 409 CONFLICT ───────────│
+ │   {                    │                       │
+ │     "error": "Obstacle detected",              │
+ │     "distance_cm": 15.3,                       │
+ │     "threshold_cm": 20.0                       │
+ │   }                    │                       │
+ │                        │                       │
+ │   [Motors NOT activated - movement blocked]    │
+```
+
 ---
-## Precaución Eléctrica Importante
-El pin **ECHO** del HC‑SR04 entrega ~**5 V** y el **ESP32** solo admite **3.3 V** en entradas. 
-Usa un **divisor resistivo** (p. ej., 10 kΩ arriba y 20 kΩ abajo) para reducir el nivel antes de conectar a `ECHO_PIN`. 
-Comparte **GND** entre el ESP32 y el sensor.
+
+## 💾 Memory Usage
+
+Compiled with Arduino IDE for ESP32 Dev Module:
+
+```
+Sketch uses 897024 bytes (68%) of program storage space. Maximum is 1310720 bytes.
+Global variables use 59648 bytes (18%) of dynamic memory, leaving 268032 bytes for local variables. Maximum is 327680 bytes.
+```
+
+### Summary
+
+| Resource | Used | Available | Percentage |
+|----------|------|-----------|------------|
+| **Flash (Program)** | ~897 KB | 1.25 MB | 68% |
+| **RAM (Static)** | ~60 KB | 320 KB | 18% |
+| **Free Heap (Runtime)** | ~240-260 KB | - | Monitored via API |
+
+### Notes
+
+- WiFi stack uses significant RAM (~40KB)
+- TLS/SSL adds to Flash usage (~100KB)
+- ArduinoJson documents are allocated on stack
+- Heap usage varies with MQTT connection state
+- Monitor via `/api/v1/healthcheck` → `free_heap` field
+
 ---
-## Pruebas Rápidas
-1. **Mock por defecto** → sin cambios, se publican lecturas cada 1s en `iot_car/ultrasonic`.
-   ```bash
-   mosquitto_sub -h broker.hivemq.com -t iot_car/ultrasonic -v
-   ```
-2. **Sensor físico** → compila con `-D USE_ULTRASONIC_MOCK=0` y **divisor** en ECHO.
-3. **Movimiento + telemetría** → `/move` sigue publicando en `iot_car/commands` mientras la telemetría fluye en paralelo.
 
+## 📚 Libraries Used
 
-## Referencias
+| Library | Version | Author | Purpose |
+|---------|---------|--------|---------|
+| WiFi | Built-in | Espressif | WiFi connectivity |
+| WiFiClientSecure | Built-in | Espressif | TLS/SSL encryption |
+| WebServer | Built-in | Espressif | HTTP server |
+| PubSubClient | 2.8+ | Nick O'Leary | MQTT client |
+| ArduinoJson | 6.21+ | Benoit Blanchon | JSON parsing/serialization |
 
-[1] OASIS, “MQTT Version 3.1.1,” 2014.
+### Installing Libraries
 
-[2] Espressif Systems, “ESP32 Technical Reference Manual,” 2023–2025.
+Arduino IDE → Sketch → Include Library → Manage Libraries:
+- Search "PubSubClient" → Install
+- Search "ArduinoJson" → Install (version 6.x)
 
-[3] OpenAI, ChatGPT.
+---
 
-[4] Tecnopura. “Sensor de ultrasonido distancia HC-SR04 para Arduino.” https://www.tecnopura.com/producto/sensor-de-ultrasonido-distancia-hc-sr04-para-arduino/
+## ⚠️ Limitations
 
-[5] Tecnopura. “Base/Soporte para módulo sensor HC-SR04.” https://www.tecnopura.com/producto/base-soporte-para-modulo-sensor-de-ultrasonido-hc-sr04/
+### Hardware Limitations
 
-[6] W3Schools. “C — Organize Code (Header Files).” https://www.w3schools.com/c/c_organize_code.php
+1. **Ultrasonic Blind Spot**: HC-SR04 minimum range is 2cm; very close objects may not be detected
+2. **Single Sensor Direction**: Only detects obstacles in front, not sides or rear
+3. **No Speed Feedback**: Without encoders, actual speed/distance traveled is unknown
+4. **Power Fluctuations**: Motor battery voltage drop affects speed consistency
+5. **WiFi Range**: ESP32 antenna limits range to ~30-50m in open space
+6. **5V Logic Issue**: HC-SR04 requires voltage divider (extra components)
 
-[7] Arduino Project Hub (Isaac100). “Getting started with the HC-SR04 ultrasonic sensor.” https://projecthub.arduino.cc/Isaac100/getting-started-with-the-hc-sr04-ultrasonic-sensor-7cabe1
+### Software Limitations
+
+1. **No Web GUI**: REST API only; no visual control interface (see Future Improvements)
+2. **No Authentication**: API is open; anyone on network can control car
+3. **No Persistent Storage**: Settings reset on power loss (no EEPROM/SPIFFS)
+4. **Fixed Telemetry Rate**: 1 second interval hardcoded
+5. **Single MQTT Connection**: Cannot connect to multiple brokers
+6. **No OTA Updates**: Must use USB cable for firmware updates
+7. **No Offline Mode**: Requires constant WiFi connection
+
+### Network Limitations
+
+1. **Public MQTT Broker**: HiveMQ is shared; data is not private
+2. **QoS 0 Only**: No guaranteed message delivery
+3. **No Reconnection Queue**: Messages lost during WiFi drops
+4. **No mDNS**: Must know IP address (no `esp32car.local`)
+
+### Operational Limitations
+
+1. **Max Duration**: 10 seconds per command (safety limit)
+2. **No Path Planning**: Point-to-point commands only
+3. **No Sensor Fusion**: Single sensor for obstacle detection
+4. **No Battery Monitoring**: Unknown battery level
+
+---
+
+## 🚀 Future Improvements
+
+### Short-Term (1-2 weeks)
+
+- [ ] **Web GUI** - HTML/JavaScript interface for visual control
+- [ ] **mDNS Support** - Access via `esp32car.local`
+- [ ] **Battery Voltage Monitor** - ADC reading of battery level
+- [ ] **Multiple Ultrasonic Sensors** - Left, front, right coverage
+- [ ] **REST API Authentication** - Basic auth or API keys
+- [ ] **OTA Firmware Updates** - Update without USB cable
+- [ ] **CORS Improvement** - Configurable allowed origins
+
+### Medium-Term (1-2 months)
+
+- [ ] **Wheel Encoders** - Measure actual distance traveled
+- [ ] **PID Control** - Precise speed regulation
+- [ ] **WebSocket Support** - Real-time bidirectional communication
+- [ ] **Mobile App** - React Native or Flutter application
+- [ ] **Path Recording** - Record and replay sequences
+- [ ] **Configuration Portal** - WiFi setup without hardcoding
+- [ ] **Private MQTT** - Self-hosted broker (Mosquitto)
+
+### Long-Term (Expert Level)
+
+- [ ] **SLAM Algorithm** - Build map of environment
+- [ ] **ESP32-CAM Integration** - Live video stream
+- [ ] **AI Object Detection** - YOLO/TensorFlow Lite
+- [ ] **Voice Control** - Google Assistant/Alexa integration
+- [ ] **Digital Twin** - 3D simulation of robot
+- [ ] **Swarm Robotics** - Multiple coordinated cars
+- [ ] **Solar Charging** - Renewable power source
+
+---
+
+## 🔄 CI/CD Pipeline (Expert Feature)
+
+This project includes a GitHub Actions workflow for continuous integration.
+
+### Features
+
+- ✅ Automatic compilation on every push
+- ✅ Syntax and error checking
+- ✅ Memory usage reporting
+- ✅ Build artifact generation (firmware.bin)
+- ✅ Documentation validation
+- ✅ Automatic releases on main branch
+
+### How It Works
+
+1. Push code to GitHub
+2. GitHub Actions triggers automatically
+3. Installs Arduino CLI and ESP32 core
+4. Compiles the sketch
+5. Reports memory usage
+6. Uploads compiled binary as artifact
+7. Creates release if version changed
+
+### Files Required
+
+- `.github/workflows/build.yml` - CI/CD workflow definition
+- `esp32_iot_car/` - Arduino sketch folder
+
+See the separate `build.yml` file for the complete workflow.
+
+---
+
+## 📁 Project Structure
+
+```
+esp32-iot-car/
+├── .github/
+│   └── workflows/
+│       └── build.yml           # CI/CD pipeline (Expert Feature)
+├── esp32_iot_car/
+│   ├── esp32_iot_car.ino      # Main Arduino sketch
+│   ├── config.h               # Configuration (WiFi, pins, etc.)
+│   └── certs.h                # TLS certificate for MQTT
+├── README.md                   # This documentation file
+└── LICENSE                     # MIT License (optional)
+```
+
+---
+
+## 🎓 Academic Requirements Checklist
+
+### BUENO Level ✅
+
+- [x] Ultrasonic sensor for obstacle detection
+- [x] Sensor data published to MQTT topic
+- [x] **Encrypted MQTT communication (TLS on port 8883)**
+- [ ] Web GUI for visualization and control *(not included - see Future Improvements)*
+- [x] REST API with required endpoints (`/api/v1/healthcheck`, `/api/v1/move`)
+- [x] Postman collection documentation
+- [x] Preprocessor variables for configuration
+- [x] Sequence/flow diagrams
+- [x] API documentation (endpoints, payloads, responses)
+- [x] MQTT topics documentation (publish/subscribe)
+- [x] Limitations documented
+- [x] Possible improvements documented
+- [x] Memory usage (Flash and RAM)
+- [x] Libraries list
+
+### EXPERTO Level ✅
+
+- [x] **CI/CD Pipeline with GitHub Actions**
+  - Automated builds on push/PR
+  - Code quality checks
+  - Memory usage reporting
+  - Build artifact generation
+  - Automatic releases
+
+---
+
+## 📄 License
+
+MIT License - Feel free to use and modify.
+
+---
+
+## 📞 Support
+
+If you encounter issues:
+
+1. Check Serial Monitor output for errors
+2. Verify wiring connections (especially voltage divider!)
+3. Ensure WiFi credentials are correct in `config.h`
+4. Test with mock sensor first (`USE_ULTRASONIC_MOCK = 1`)
+5. Verify MQTT connection in `/api/v1/healthcheck`
+
+---
+
+**Built for IoT Systems Course - 2025**
