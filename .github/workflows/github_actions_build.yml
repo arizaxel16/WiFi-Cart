@@ -13,7 +13,7 @@ on:
 # ✅ CORRECCIÓN 1: Permisos para crear releases (Soluciona el error 403)
 permissions:
   contents: write
-
+#nuevo
 jobs:
   build:
     name: Build Arduino Sketch
@@ -318,6 +318,7 @@ jobs:
     needs: [build, code-quality, documentation]
     if: always()
     
+
     steps:
       - name: Generate Summary
         run: |
