@@ -30,7 +30,12 @@ jobs:
 
       - name: Install Required Libraries
         run: |
-          arduino-cli lib install "ArduinoJson"
+          # Forzar la versión 6.x de ArduinoJson para compatibilidad con StaticJsonDocument
+          arduino-cli lib install "ArduinoJson@6.21.5"
+          
+          # Si planeas usar MQTT como dice tu README, necesitas esta librería también:
+          arduino-cli lib install "PubSubClient"
+          
           echo "✅ Libraries installed:"
           arduino-cli lib list
 
