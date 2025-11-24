@@ -1,7 +1,6 @@
 /*
   ESP32 IoT Car Controller - FINAL VERSION
   HTTP server + Full Sensor Telemetry
-  NO MQTT - Pure HTTP only
   
   For Arduino IDE - ESP32 Board
 */    
