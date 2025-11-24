@@ -10,6 +10,10 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# ✅ CORRECCIÓN 1: Permisos para crear releases (Soluciona el error 403)
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build Arduino Sketch
@@ -30,10 +34,8 @@ jobs:
 
       - name: Install Required Libraries
         run: |
-          # Forzar la versión 6.x de ArduinoJson para compatibilidad con StaticJsonDocument
+          # ✅ CORRECCIÓN 2: Instalar versión compatible de ArduinoJson y PubSubClient
           arduino-cli lib install "ArduinoJson@6.21.5"
-          
-          # Si planeas usar MQTT como dice tu README, necesitas esta librería también:
           arduino-cli lib install "PubSubClient"
           
           echo "✅ Libraries installed:"
